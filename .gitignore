@@ -1,0 +1,32 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Downloaded filings (large files, re-downloadable)
+data/*
+!data/.gitkeep
+
+# ChromaDB local storage
+chroma_db/
+
+# Results / eval outputs
+results/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
