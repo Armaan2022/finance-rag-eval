@@ -181,9 +181,43 @@ def strip_html(text: str) -> str:
     text = re.sub(r"<(script|style)[^>]*>.*?</(script|style)>", "", text, flags=re.DOTALL | re.IGNORECASE)
     # Remove all remaining HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
+    # Decode common HTML entities (e.g. &#8217; → ', &amp; → &)
+    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    text = text.replace("&nbsp;", " ").replace("&quot;", '"').replace("&#8217;", "'")
+    text = text.replace("&#8220;", '"').replace("&#8221;", '"').replace("&#8212;", "—")
+    # Remove any remaining numeric HTML entities like &#9744;
+    text = re.sub(r"&#\d+;", " ", text)
+    text = re.sub(r"&[a-zA-Z]+;", " ", text)
     # Collapse whitespace and blank lines
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def remove_xbrl_noise(text: str) -> str:
+    """
+    Remove XBRL inline data fragments that survive HTML stripping.
+
+    10-K filings embed machine-readable XBRL tags as text like:
+      "us-gaap:FairValueInputsLevel1Member 2025-09-27 0000320193..."
+    These are useless for RAG — they're structured accounting codes, not
+    natural language. A retriever trained on this noise would match XBRL
+    identifiers instead of meaningful financial sentences.
+
+    We detect these by looking for the characteristic "namespace:CamelCase"
+    pattern (e.g. us-gaap:RevenueFromContractWithCustomer) and remove any
+    sentence-like run that contains more than 3 such tokens.
+    """
+    # Pattern: word characters, a colon, then a CamelCase identifier
+    xbrl_token = re.compile(r'\b[a-z][\w-]*:[A-Z][A-Za-z]+\b')
+
+    cleaned_lines = []
+    for line in text.split(". "):
+        matches = xbrl_token.findall(line)
+        # If more than 3 XBRL tokens in a sentence-fragment, it's machine data
+        if len(matches) <= 3:
+            cleaned_lines.append(line)
+
+    return ". ".join(cleaned_lines)
 
 
 def read_filing_text(filepath: Path) -> str:
@@ -194,7 +228,8 @@ def read_filing_text(filepath: Path) -> str:
     raw = filepath.read_bytes().decode("utf-8", errors="replace")
 
     if filepath.suffix.lower() in (".htm", ".html"):
-        return strip_html(raw)
+        text = strip_html(raw)
+        return remove_xbrl_noise(text)
     return raw
 
 
