@@ -112,7 +112,7 @@ def load_vector_store() -> Chroma:
 # Build a retriever
 # ---------------------------------------------------------------------------
 
-def get_retriever(vector_store: Chroma, k: int = 5):
+def get_retriever(vector_store: Chroma, k: int = 5, metadata_filter: dict | None = None):
     """
     Wrap the vector store as a retriever.
 
@@ -120,6 +120,8 @@ def get_retriever(vector_store: Chroma, k: int = 5):
         vector_store: A Chroma instance (from build or load).
         k: Number of chunks to return per query. 5 is a good default —
            enough context for the LLM, not so many that the prompt bloats.
+        metadata_filter: Optional ChromaDB filter dict, e.g. {"ticker": "AAPL"}
+           to restrict search to a specific company or filing year.
 
     Returns:
         A LangChain retriever. Call retriever.invoke("your question") to
@@ -129,9 +131,13 @@ def get_retriever(vector_store: Chroma, k: int = 5):
     In Week 2 we'll switch to "mmr" (Maximal Marginal Relevance) which
     balances relevance with diversity to avoid returning 5 near-identical chunks.
     """
+    search_kwargs: dict = {"k": k}
+    if metadata_filter is not None:
+        search_kwargs["filter"] = metadata_filter
+
     return vector_store.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": k},
+        search_kwargs=search_kwargs,
     )
 
 
