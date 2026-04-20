@@ -1,11 +1,12 @@
+from typing import Any
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+from pydantic import model_validator
 from rank_bm25 import BM25Okapi
 
 
-# ---------------------------------------------------------------------------
 # BM25 index
-# ---------------------------------------------------------------------------
-
 def build_bm25_index(chunks: list[Document]) -> tuple[BM25Okapi, list[Document]]:
     """
     Build a BM25 index from a list of Document chunks.
@@ -51,10 +52,7 @@ def bm25_search(
     return [(chunks[i], rank + 1) for rank, i in enumerate(top_indices)]
 
 
-# ---------------------------------------------------------------------------
 # Reciprocal Rank Fusion
-# ---------------------------------------------------------------------------
-
 def reciprocal_rank_fusion(
     ranked_lists: list[list[tuple[Document, int]]],
     k: int = 60,
@@ -93,50 +91,38 @@ def reciprocal_rank_fusion(
     return [doc_map[key] for key in sorted_keys[:top_n]]
 
 
-# ---------------------------------------------------------------------------
 # Hybrid retriever
-# ---------------------------------------------------------------------------
-
-class HybridRetriever:
+class HybridRetriever(BaseRetriever):
     """
     A retriever that combines ChromaDB vector search with BM25 keyword
     search using Reciprocal Rank Fusion.
 
-    Usage:
-        retriever = HybridRetriever(vector_store, chunks, k=5)
-        docs = retriever.invoke("Apple's revenue in 2025")
+    Inherits from BaseRetriever so it works as a drop-in replacement
+    in LangChain LCEL pipelines (supports the | pipe operator).
 
-    The invoke() interface matches LangChain's standard retriever interface,
-    so this is a drop-in replacement for the pure vector retriever used in
-    pipeline.py — no changes needed to the RAG chain.
-
-    Args:
-        vector_store: A LangChain Chroma instance.
-        chunks:       The same Document list used to build the vector store.
-        k:            Number of final results to return.
-        fetch_k:      How many candidates to fetch from each method before
-                      fusion. More candidates = better fusion quality but
-                      slower. 20 is a good default.
-        metadata_filter: Optional ChromaDB filter dict, e.g.:
-                      {"ticker": "AAPL"} to restrict search to Apple only.
-                      We'll use this in the Streamlit UI (Week 4).
+    BaseRetriever is a Pydantic model, so all fields must be declared
+    as class-level annotations. Non-standard types (BM25Okapi, Chroma)
+    are allowed via model_config.
     """
 
-    def __init__(
-        self,
-        vector_store,
-        chunks: list[Document],
-        k: int = 5,
-        fetch_k: int = 20,
-        metadata_filter: dict | None = None,
-    ):
-        self.vector_store = vector_store
-        self.k = k
-        self.fetch_k = fetch_k
-        self.metadata_filter = metadata_filter
-        self.bm25, self.chunks = build_bm25_index(chunks)
+    model_config = {"arbitrary_types_allowed": True}
 
-    def invoke(self, query: str) -> list[Document]:
+    vector_store: Any
+    chunks: list[Document]
+    k: int = 5
+    fetch_k: int = 20
+    metadata_filter: dict | None = None
+    bm25: Any = None  # populated by model_validator after init
+
+    @model_validator(mode="after")
+    def _build_bm25(self):
+        self.bm25, _ = build_bm25_index(self.chunks)
+        return self
+
+    def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None) -> list[Document]:
+        return self._hybrid_search(query)
+
+    def _hybrid_search(self, query: str) -> list[Document]:
         """
         Run hybrid retrieval: vector + BM25 → RRF fusion.
         """
@@ -180,10 +166,7 @@ class HybridRetriever:
         )
 
 
-# ---------------------------------------------------------------------------
 # Quick comparison: vector-only vs hybrid
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     from dotenv import load_dotenv
     from src.ingestion.sec_edgar import ingest_tickers
@@ -205,7 +188,7 @@ if __name__ == "__main__":
         vector_store = build_vector_store(chunks)
 
     vector_retriever = get_retriever(vector_store, k=5)
-    hybrid_retriever = HybridRetriever(vector_store, chunks, k=5)
+    hybrid_retriever = HybridRetriever(vector_store=vector_store, chunks=chunks, k=5)
 
     test_queries = [
         "What is Apple's EBITDA?",
