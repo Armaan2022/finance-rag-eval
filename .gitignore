@@ -20,8 +20,10 @@ data/*
 # ChromaDB local storage
 chroma_db/
 
-# Results / eval outputs
-results/
+# Results / eval outputs (keep CSV, ignore large files)
+results/*
+!results/.gitkeep
+!results/eval_metrics.csv
 
 # IDE
 .vscode/

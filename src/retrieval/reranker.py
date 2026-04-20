@@ -2,10 +2,8 @@ from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
 
 
-# ---------------------------------------------------------------------------
-# Model loading
-# ---------------------------------------------------------------------------
 
+# Model loading
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # The model is ~85MB and takes ~2 seconds to load. Loading it per-query would make every question take 2+ extra seconds.
@@ -21,10 +19,8 @@ def get_reranker() -> CrossEncoder:
     return reranker
 
 
-# ---------------------------------------------------------------------------
-# Reranking function
-# ---------------------------------------------------------------------------
 
+# Reranking function
 def rerank(
     query: str,
     docs: list[Document],
@@ -57,10 +53,8 @@ def rerank(
     return [doc for _, doc in scored_docs[:top_n]]
 
 
-# ---------------------------------------------------------------------------
-# Full retrieval pipeline: hybrid → rerank
-# ---------------------------------------------------------------------------
 
+# Full retrieval pipeline: hybrid → rerank
 def retrieve_and_rerank(
     query: str,
     hybrid_retriever,
@@ -84,10 +78,8 @@ def retrieve_and_rerank(
     return rerank(query, candidates, top_n=top_n)
 
 
-# ---------------------------------------------------------------------------
-# Quick comparison: hybrid vs hybrid + rerank
-# ---------------------------------------------------------------------------
 
+# Quick comparison: hybrid vs hybrid + rerank
 if __name__ == "__main__":
     from dotenv import load_dotenv
     from src.ingestion.sec_edgar import ingest_tickers
@@ -110,7 +102,7 @@ if __name__ == "__main__":
         vector_store = build_vector_store(chunks)
 
     # fetch_k=20 gives the reranker a meaningful pool to work with
-    hybrid_retriever = HybridRetriever(vector_store, chunks, k=20, fetch_k=20)
+    hybrid_retriever = HybridRetriever(vector_store=vector_store, chunks=chunks, k=20, fetch_k=20)
 
     test_queries = [
         "What was Apple's total revenue in fiscal year 2025?",
