@@ -1,0 +1,4 @@
+timestamp,pipeline,faithfulness,answer_relevancy,context_precision,context_recall,avg_score
+2026-04-19 23:34,vector_only,0.8667,0.4260,0.6950,0.7000,0.6719
+2026-04-19 23:34,hybrid,0.8042,0.3990,0.5837,0.6000,0.5967
+2026-04-19 23:34,hybrid_rerank,0.6693,0.4160,0.6417,0.6333,0.5901
