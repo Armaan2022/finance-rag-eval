@@ -8,4 +8,6 @@ ragas
 pypdf
 python-dotenv
 streamlit
+pandas
+matplotlib
 requests
