@@ -10,4 +10,6 @@ python-dotenv
 streamlit
 pandas
 matplotlib
+qdrant-client
+langchain-qdrant
 requests
