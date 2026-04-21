@@ -1,20 +1,3 @@
-"""
-Vector Store Module
--------------------
-Embeds document chunks and stores them in ChromaDB for semantic search.
-
-Key concepts:
-- Embedding: converting text into a fixed-size list of numbers (a vector)
-  that captures semantic meaning. Similar text → similar vectors.
-- Vector store: a database optimised for storing and searching vectors.
-  ChromaDB stores each chunk as (id, vector, text, metadata).
-- Cosine similarity: how ChromaDB measures closeness between vectors.
-  Two vectors pointing in the same direction = similar meaning (score → 1).
-  Perpendicular vectors = unrelated (score → 0).
-- Retriever: a wrapper that takes a query string, embeds it, searches
-  ChromaDB, and returns the top-k most relevant Document objects.
-"""
-
 from pathlib import Path
 
 import chromadb

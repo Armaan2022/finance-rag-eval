@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -28,22 +27,18 @@ def load_pipeline():
     """
     from src.ingestion.sec_edgar import ingest_tickers
     from src.processing.chunker import chunk_documents
-    from src.retrieval.vector_store import load_vector_store, build_vector_store, get_retriever
+    from src.retrieval.qdrant_store import load_qdrant_store, get_retriever
     from src.retrieval.hybrid_search import HybridRetriever
     from src.rag.pipeline import build_rag_chain
 
-    CHROMA_DIR = Path("chroma_db")
     TICKERS = ["AAPL", "MSFT", "GOOGL"]
 
     # Load documents and chunks (needed for BM25 index)
     documents = ingest_tickers(TICKERS, max_filings_per_ticker=2)
     chunks = chunk_documents(documents, config_name="medium")
 
-    # Load or build vector store
-    if CHROMA_DIR.exists() and any(CHROMA_DIR.iterdir()):
-        vector_store = load_vector_store()
-    else:
-        vector_store = build_vector_store(chunks)
+    # Connect to Qdrant Cloud (vectors already uploaded — no re-embedding needed)
+    vector_store = load_qdrant_store()
 
     # Build all three retrievers
     retrievers = {
@@ -133,8 +128,8 @@ def render_eval_tab():
     st.header("Pipeline Evaluation Results")
     st.caption("RAGAS metrics measured on 10 hand-crafted Q&A pairs from AAPL 10-K filings")
 
-    csv_path = Path("results/eval_metrics.csv")
-    if not csv_path.exists():
+    csv_path = "results/eval_metrics.csv"
+    if not os.path.exists(csv_path):
         st.info("No evaluation results yet. Run `python -m src.evaluation.evaluator` to generate them.")
         return
 
