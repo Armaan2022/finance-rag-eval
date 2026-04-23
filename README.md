@@ -2,7 +2,7 @@
 
 A production-grade **Retrieval-Augmented Generation (RAG)** system for querying SEC 10-K annual filings from Apple, Microsoft, and Google. Built to demonstrate that evaluation is not an afterthought — it's how you discover what actually works.
 
-**Live demo:** [[YOUR_APP_URL](https://finance-rag-eval-armaan.streamlit.app/)]
+**Live demo:** [(https://finance-rag-eval-armaan.streamlit.app/)]
 
 ---
 
