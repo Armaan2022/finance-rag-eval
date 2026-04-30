@@ -128,7 +128,7 @@ class HybridRetriever(BaseRetriever):
         """
         # --- Vector search ---
         # get_retriever() from vector_store.py with fetch_k=20 candidates.
-        from src.retrieval.vector_store import get_retriever
+        from src.retrieval.qdrant_store import get_retriever
 
         vector_retriever = get_retriever(
             self.vector_store,
