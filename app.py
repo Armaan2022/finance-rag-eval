@@ -1,6 +1,4 @@
-import json
 import os
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -18,25 +16,14 @@ st.set_page_config(
 
 
 # ---------------------------------------------------------------------------
-# Ticker JSON management
+# Ticker list — derived from Qdrant (the single source of truth)
 # ---------------------------------------------------------------------------
 
-TICKERS_JSON = Path("data/loaded_tickers.json")
-DEFAULT_TICKERS = ["AAPL", "MSFT", "GOOGL"]
-
-
-def load_tickers_json() -> list[str]:
-    if not TICKERS_JSON.exists():
-        save_tickers_json(DEFAULT_TICKERS)
-        return list(DEFAULT_TICKERS)
-    with open(TICKERS_JSON) as f:
-        return json.load(f)["tickers"]
-
-
-def save_tickers_json(tickers: list[str]) -> None:
-    TICKERS_JSON.parent.mkdir(exist_ok=True)
-    with open(TICKERS_JSON, "w") as f:
-        json.dump({"tickers": sorted(set(t.upper() for t in tickers))}, f)
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_loaded_tickers() -> list[str]:
+    """Return the sorted list of tickers currently stored in Qdrant."""
+    from src.retrieval.qdrant_store import get_tickers_from_qdrant
+    return get_tickers_from_qdrant()
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +82,8 @@ def render_sidebar(tickers: list[str]) -> list[str]:
                 with st.spinner(f"Removing {ticker}..."):
                     from src.retrieval.qdrant_store import delete_ticker_vectors
                     delete_ticker_vectors(ticker)
-                    tickers = [t for t in tickers if t != ticker]
-                    save_tickers_json(tickers)
-                    load_pipeline.clear()
+                fetch_loaded_tickers.clear()
+                load_pipeline.clear()
                 st.rerun()
 
         st.divider()
@@ -123,8 +109,7 @@ def render_sidebar(tickers: list[str]) -> list[str]:
                             from src.retrieval.qdrant_store import upload_ticker_chunks
                             chunks = chunk_documents(documents, config_name="medium")
                             upload_ticker_chunks(chunks)
-                            tickers = tickers + [new_ticker]
-                            save_tickers_json(tickers)
+                            fetch_loaded_tickers.clear()
                             load_pipeline.clear()
                             st.rerun()
                     except ValueError:
@@ -257,20 +242,20 @@ def render_eval_tab():
 # ---------------------------------------------------------------------------
 
 def main():
-    st.title("📊 Finance RAG")
+    st.title("Finance RAG")
     st.divider()
 
     if not os.getenv("OPENAI_API_KEY"):
         st.error("OPENAI_API_KEY not set. Add it to your .env file.")
         st.stop()
 
-    tickers = load_tickers_json()
+    tickers = fetch_loaded_tickers()
     tickers = render_sidebar(tickers)
 
     tickers_key = ",".join(sorted(tickers))
     retrievers, chunks, vector_store = load_pipeline(tickers_key)
 
-    tab1, tab2 = st.tabs(["Chat", "Eval Dashboard"])
+    tab1, tab2 = st.tabs(["Q & A", "Eval Dashboard"])
 
     with tab1:
         render_qa_tab(retrievers, tickers)

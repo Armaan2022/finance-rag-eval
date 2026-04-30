@@ -92,6 +92,37 @@ def delete_ticker_vectors(ticker: str) -> None:
     print(f"  Deleted vectors for {ticker} from Qdrant.")
 
 
+def get_tickers_from_qdrant() -> list[str]:
+    """
+    Query Qdrant for the distinct set of tickers stored in the collection.
+
+    This is the authoritative source of truth — no JSON file needed.
+    Scrolls through all points (without vectors) and collects unique ticker values
+    from the metadata payload.
+    """
+    client = _get_client()
+    tickers: set[str] = set()
+    offset = None
+
+    while True:
+        results, next_offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=1000,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in results:
+            ticker = point.payload.get("metadata", {}).get("ticker")
+            if ticker:
+                tickers.add(ticker)
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    return sorted(tickers)
+
+
 def get_retriever(vector_store: QdrantVectorStore, k: int = 5, metadata_filter: dict | None = None):
     """
     Wrap the Qdrant store as a LangChain retriever.
