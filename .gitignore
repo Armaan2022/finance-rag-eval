@@ -16,7 +16,6 @@ env/
 # Downloaded filings (large files, re-downloadable)
 data/*
 !data/.gitkeep
-!data/loaded_tickers.json
 
 # ChromaDB local storage
 chroma_db/
