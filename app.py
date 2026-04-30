@@ -1,4 +1,6 @@
+import json
 import os
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -15,32 +17,53 @@ st.set_page_config(
 )
 
 
-# Pipeline loading (cached so it only runs once per session)
-@st.cache_resource(show_spinner="Loading pipeline...")
-def load_pipeline():
-    """
-    Load all pipeline components once and cache them for the session.
+# ---------------------------------------------------------------------------
+# Ticker JSON management
+# ---------------------------------------------------------------------------
 
-    st.cache_resource caches the return value across all users and reruns.
-    Without this, every interaction would re-embed documents and reload
-    the cross-encoder model — making the app painfully slow.
+TICKERS_JSON = Path("data/loaded_tickers.json")
+DEFAULT_TICKERS = ["AAPL", "MSFT", "GOOGL"]
+
+
+def load_tickers_json() -> list[str]:
+    if not TICKERS_JSON.exists():
+        save_tickers_json(DEFAULT_TICKERS)
+        return list(DEFAULT_TICKERS)
+    with open(TICKERS_JSON) as f:
+        return json.load(f)["tickers"]
+
+
+def save_tickers_json(tickers: list[str]) -> None:
+    TICKERS_JSON.parent.mkdir(exist_ok=True)
+    with open(TICKERS_JSON, "w") as f:
+        json.dump({"tickers": sorted(set(t.upper() for t in tickers))}, f)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline loading (cached per unique set of tickers)
+# ---------------------------------------------------------------------------
+
+@st.cache_resource(show_spinner="Loading pipeline...")
+def load_pipeline(tickers_key: str):
+    """
+    Load all pipeline components and cache them.
+
+    tickers_key is a sorted comma-joined string of tickers (e.g. "AAPL,GOOGL,MSFT").
+    Changing the tickers invalidates the cache and triggers a fresh load.
+    Files are already downloaded locally and vectors are in Qdrant — only
+    chunking (for BM25) and the Qdrant connection happen here.
     """
     from src.ingestion.sec_edgar import ingest_tickers
     from src.processing.chunker import chunk_documents
     from src.retrieval.qdrant_store import load_qdrant_store, get_retriever
     from src.retrieval.hybrid_search import HybridRetriever
-    from src.rag.pipeline import build_rag_chain
 
-    TICKERS = ["AAPL", "MSFT", "GOOGL"]
+    tickers = tickers_key.split(",")
 
-    # Load documents and chunks (needed for BM25 index)
-    documents = ingest_tickers(TICKERS, max_filings_per_ticker=2)
+    documents = ingest_tickers(tickers, max_filings_per_ticker=2)
     chunks = chunk_documents(documents, config_name="medium")
-
-    # Connect to Qdrant Cloud (vectors already uploaded — no re-embedding needed)
     vector_store = load_qdrant_store()
 
-    # Build all three retrievers
     retrievers = {
         "Vector only": get_retriever(vector_store, k=5),
         "Hybrid (BM25 + Vector + RRF)": HybridRetriever(
@@ -54,11 +77,69 @@ def load_pipeline():
     return retrievers, chunks, vector_store
 
 
+# ---------------------------------------------------------------------------
+# Sidebar — ticker management
+# ---------------------------------------------------------------------------
 
+def render_sidebar(tickers: list[str]) -> list[str]:
+    """Render the ticker management sidebar. Returns the current tickers list."""
+    with st.sidebar:
+        st.header("Loaded Filings")
+        st.caption(f"{len(tickers)} ticker(s) in Qdrant")
+        st.divider()
+
+        for ticker in tickers:
+            col1, col2 = st.columns([5, 1])
+            col1.markdown(f"**{ticker}**")
+            if col2.button("🗑", key=f"remove_{ticker}", help=f"Remove {ticker}"):
+                with st.spinner(f"Removing {ticker}..."):
+                    from src.retrieval.qdrant_store import delete_ticker_vectors
+                    delete_ticker_vectors(ticker)
+                    tickers = [t for t in tickers if t != ticker]
+                    save_tickers_json(tickers)
+                    load_pipeline.clear()
+                st.rerun()
+
+        st.divider()
+        st.markdown("**Add a ticker**")
+
+        with st.form("add_ticker_form", clear_on_submit=True):
+            new_ticker = st.text_input("Ticker symbol", placeholder="e.g. NVDA").strip().upper()
+            submitted = st.form_submit_button("Load filings", use_container_width=True)
+
+        if submitted and new_ticker:
+            if new_ticker in tickers:
+                st.error(f"{new_ticker} is already loaded.")
+            else:
+                with st.spinner(f"Fetching {new_ticker} from SEC EDGAR..."):
+                    try:
+                        from src.ingestion.sec_edgar import get_cik_from_ticker, ingest_tickers
+                        get_cik_from_ticker(new_ticker)  # raises ValueError if not found
+                        documents = ingest_tickers([new_ticker], max_filings_per_ticker=2)
+                        if not documents:
+                            st.error(f"No 10-K filings found for {new_ticker}.")
+                        else:
+                            from src.processing.chunker import chunk_documents
+                            from src.retrieval.qdrant_store import upload_ticker_chunks
+                            chunks = chunk_documents(documents, config_name="medium")
+                            upload_ticker_chunks(chunks)
+                            tickers = tickers + [new_ticker]
+                            save_tickers_json(tickers)
+                            load_pipeline.clear()
+                            st.rerun()
+                    except ValueError:
+                        st.error(f"'{new_ticker}' not found on SEC EDGAR. Check the ticker symbol.")
+
+    return tickers
+
+
+# ---------------------------------------------------------------------------
 # Tab 1 — Q&A Interface
-def render_qa_tab(retrievers):
+# ---------------------------------------------------------------------------
+
+def render_qa_tab(retrievers, tickers):
     st.header("Ask questions about SEC 10-K filings")
-    st.caption("Covers Apple (AAPL), Microsoft (MSFT), and Google (GOOGL) — 2024 & 2025 annual reports")
+    st.caption(f"Covers {', '.join(tickers)} — 2024 & 2025 annual reports")
 
     col1, col2 = st.columns([2, 1])
 
@@ -96,7 +177,6 @@ def render_qa_tab(retrievers):
             with st.spinner("Retrieving and generating answer..."):
                 from src.rag.pipeline import build_rag_chain, ask
 
-                # Use reranker for the third pipeline variant
                 use_reranker = (pipeline_choice == "Hybrid + Reranker")
                 chain = build_rag_chain(retriever)
                 result = ask(chain, retriever, query)
@@ -122,8 +202,10 @@ def render_qa_tab(retrievers):
                     st.caption(src["preview"] + "...")
 
 
-
+# ---------------------------------------------------------------------------
 # Tab 2 — Evaluation Results
+# ---------------------------------------------------------------------------
+
 def render_eval_tab():
     st.header("Pipeline Evaluation Results")
     st.caption("RAGAS metrics measured on 10 hand-crafted Q&A pairs from AAPL 10-K filings")
@@ -135,15 +217,12 @@ def render_eval_tab():
 
     df = pd.read_csv(csv_path)
 
-    # Show latest run only
     latest = df[df["timestamp"] == df["timestamp"].max()].copy()
 
-    # Metric cards for the best pipeline
     best = latest.loc[latest["avg_score"].astype(float).idxmax()]
     st.markdown(f"**Best pipeline:** `{best['pipeline']}` — avg score `{float(best['avg_score']):.3f}`")
     st.divider()
 
-    # Metrics comparison table
     display_cols = ["pipeline", "faithfulness", "answer_relevancy", "context_precision", "context_recall", "avg_score"]
     st.dataframe(
         latest[display_cols].style.format({
@@ -173,82 +252,30 @@ def render_eval_tab():
         st.line_chart(history)
 
 
-
-# Tab 3 — About
-def render_about_tab():
-    st.header("About this project")
-
-    st.markdown("""
-### Finance RAG with Deep Evaluation
-
-A **Retrieval-Augmented Generation (RAG)** system for querying SEC 10-K annual
-filings from Apple, Microsoft, and Google.
-
-Built over 4 weeks to demonstrate production-grade RAG engineering:
-grounding LLM answers in real financial documents and measuring quality rigorously.
-
----
-
-### Architecture
-
-```
-SEC EDGAR API
-      ↓
-  HTML parsing + XBRL noise removal
-      ↓
-  RecursiveCharacterTextSplitter (512 chars, 64 overlap)
-      ↓
-  text-embedding-3-small → ChromaDB (vector store)
-      ↓
-  Hybrid retrieval: BM25 + Vector + Reciprocal Rank Fusion
-      ↓
-  Cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
-      ↓
-  GPT-4o-mini with grounding prompt
-      ↓
-  Answer + source attribution
-```
-
-### Evaluation
-
-Measured with **RAGAS** across three pipeline variants on 20 hand-crafted
-Q&A pairs derived from the actual filings.
-
-Key finding: vector-only retrieval outperforms hybrid on a small corpus
-(2 filings per company). BM25 adds noise when term frequency statistics
-are thin. This was discovered through the evaluation layer — not assumed.
-
----
-
-### Stack
-
-`LangChain` · `ChromaDB` · `OpenAI` · `BM25` · `sentence-transformers` · `RAGAS` · `Streamlit`
-
-**Source code:** [github.com/Armaan2022/finance-rag-eval](https://github.com/Armaan2022/finance-rag-eval)
-""")
-
-
-
+# ---------------------------------------------------------------------------
 # Main app
+# ---------------------------------------------------------------------------
+
 def main():
     st.title("📊 Finance RAG")
-    st.markdown("*Answers grounded in SEC 10-K filings from AAPL, MSFT, GOOGL*")
     st.divider()
 
     if not os.getenv("OPENAI_API_KEY"):
         st.error("OPENAI_API_KEY not set. Add it to your .env file.")
         st.stop()
 
-    retrievers, chunks, vector_store = load_pipeline()
+    tickers = load_tickers_json()
+    tickers = render_sidebar(tickers)
 
-    tab1, tab2, tab3 = st.tabs(["💬 Q&A", "📈 Eval Results", "ℹ️ About"])
+    tickers_key = ",".join(sorted(tickers))
+    retrievers, chunks, vector_store = load_pipeline(tickers_key)
+
+    tab1, tab2 = st.tabs(["Chat", "Eval Dashboard"])
 
     with tab1:
-        render_qa_tab(retrievers)
+        render_qa_tab(retrievers, tickers)
     with tab2:
         render_eval_tab()
-    with tab3:
-        render_about_tab()
 
 
 if __name__ == "__main__":
