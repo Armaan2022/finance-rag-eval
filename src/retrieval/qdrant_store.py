@@ -70,6 +70,28 @@ def load_qdrant_store() -> QdrantVectorStore:
     )
 
 
+def upload_ticker_chunks(chunks: list[Document]) -> None:
+    """Add chunks for a new ticker to an existing Qdrant collection."""
+    vector_store = load_qdrant_store()
+    vector_store.add_documents(chunks)
+    print(f"  Uploaded {len(chunks)} chunks to Qdrant Cloud.")
+
+
+def delete_ticker_vectors(ticker: str) -> None:
+    """Delete all vectors for a given ticker from Qdrant."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
+    client = _get_client()
+    client.delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=FilterSelector(
+            filter=Filter(
+                must=[FieldCondition(key="metadata.ticker", match=MatchValue(value=ticker.upper()))]
+            )
+        ),
+    )
+    print(f"  Deleted vectors for {ticker} from Qdrant.")
+
+
 def get_retriever(vector_store: QdrantVectorStore, k: int = 5, metadata_filter: dict | None = None):
     """
     Wrap the Qdrant store as a LangChain retriever.
