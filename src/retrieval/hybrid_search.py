@@ -147,7 +147,12 @@ class HybridRetriever(BaseRetriever):
                 match = True
 
                 for key, value in self.metadata_filter.items():
-                    if chunk.metadata.get(key) != value:
+                    chunk_val = chunk.metadata.get(key)
+                    if isinstance(value, list):
+                        if chunk_val not in value:
+                            match = False
+                            break
+                    elif chunk_val != value:
                         match = False
                         break
 
