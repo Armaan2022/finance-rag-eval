@@ -127,12 +127,20 @@ def get_retriever(vector_store: QdrantVectorStore, k: int = 5, metadata_filter: 
     """
     Wrap the Qdrant store as a LangChain retriever.
 
-    metadata_filter example: {"ticker": "AAPL"}
-    Qdrant translates this into a payload filter automatically via langchain-qdrant.
+    metadata_filter: a plain dict like {"ticker": "AAPL"} or {"ticker": ["AAPL", "MSFT"]}.
+    List values are treated as OR (MatchAny). This is converted to a Qdrant Filter object
+    so Qdrant can apply it server-side.
     """
     search_kwargs: dict = {"k": k}
     if metadata_filter is not None:
-        search_kwargs["filter"] = metadata_filter
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+        must = []
+        for key, val in metadata_filter.items():
+            if isinstance(val, list):
+                must.append(FieldCondition(key=f"metadata.{key}", match=MatchAny(any=val)))
+            else:
+                must.append(FieldCondition(key=f"metadata.{key}", match=MatchValue(value=val)))
+        search_kwargs["filter"] = Filter(must=must)
 
     return vector_store.as_retriever(
         search_type="similarity",
