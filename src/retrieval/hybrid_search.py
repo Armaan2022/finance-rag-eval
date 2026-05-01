@@ -127,13 +127,25 @@ class HybridRetriever(BaseRetriever):
         Run hybrid retrieval: vector + BM25 → RRF fusion.
         """
         # --- Vector search ---
-        # get_retriever() from vector_store.py with fetch_k=20 candidates.
         from src.retrieval.qdrant_store import get_retriever
+
+        # Convert metadata_filter dict to a Qdrant Filter object so the client
+        # receives a typed model, not a plain dict (which fails Pydantic validation).
+        qdrant_filter = None
+        if self.metadata_filter is not None:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+            must = []
+            for key, val in self.metadata_filter.items():
+                if isinstance(val, list):
+                    must.append(FieldCondition(key=f"metadata.{key}", match=MatchAny(any=val)))
+                else:
+                    must.append(FieldCondition(key=f"metadata.{key}", match=MatchValue(value=val)))
+            qdrant_filter = Filter(must=must)
 
         vector_retriever = get_retriever(
             self.vector_store,
             k=self.fetch_k,
-            metadata_filter=self.metadata_filter,
+            metadata_filter=qdrant_filter,
         )
         vector_docs = vector_retriever.invoke(query)
         vector_ranked = [(doc, rank + 1) for rank, doc in enumerate(vector_docs)]
