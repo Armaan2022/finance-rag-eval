@@ -7,20 +7,14 @@ from langchain_openai import OpenAIEmbeddings
 
 
 # Configuration
-
 CHROMA_DIR = Path(__file__).resolve().parents[2] / "chroma_db"
 
 # text-embedding-3-small: OpenAI's efficient embedding model, 1,536 dimensions, cheap, fast.
 EMBEDDING_MODEL = "text-embedding-3-small"
 
-# Each filing type gets its own ChromaDB collection so we can filter by it
-# later (Week 2 metadata filtering). Think of collections like tables in SQL.
 COLLECTION_NAME = "sec_10k_filings"
 
 
-# ---------------------------------------------------------------------------
-# Build or load the vector store
-# ---------------------------------------------------------------------------
 
 def get_embeddings() -> OpenAIEmbeddings:
     """
@@ -33,21 +27,8 @@ def get_embeddings() -> OpenAIEmbeddings:
 def build_vector_store(chunks: list[Document], reset: bool = False) -> Chroma:
     """
     Embed a list of Document chunks and store them in ChromaDB.
-
-    Args:
-        chunks:  Output from chunk_documents() — LangChain Document objects.
-        reset:   If True, delete the existing collection and rebuild from
-                 scratch. Use this when you change chunk configs or add new
-                 filings. If False, skip documents already in the store.
-
-    Returns:
-        A LangChain Chroma object you can use as a retriever.
-
-    Why persist to disk?
-        Embedding 1,300 chunks costs ~$0.001 and takes ~5 seconds. Without
-        persistence, you'd pay that cost on every restart. ChromaDB writes
-        to CHROMA_DIR so subsequent runs load vectors from disk instantly.
     """
+
     CHROMA_DIR.mkdir(exist_ok=True)
     embeddings = get_embeddings()
 
@@ -60,7 +41,6 @@ def build_vector_store(chunks: list[Document], reset: bool = False) -> Chroma:
     print(f"  Embedding {len(chunks)} chunks with {EMBEDDING_MODEL}...")
 
     # Chroma.from_documents() embeds all chunks and writes them to disk in one call.
-    # Under the hood: chunks → OpenAI API → 1536-dim vectors → ChromaDB storage.
     vector_store = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
@@ -75,8 +55,8 @@ def build_vector_store(chunks: list[Document], reset: bool = False) -> Chroma:
 def load_vector_store() -> Chroma:
     """
     Load an existing ChromaDB collection from disk without re-embedding.
-    Call this after the first build_vector_store() run.
     """
+
     return Chroma(
         collection_name=COLLECTION_NAME,
         embedding_function=get_embeddings(),
@@ -84,29 +64,12 @@ def load_vector_store() -> Chroma:
     )
 
 
-# ---------------------------------------------------------------------------
-# Build a retriever
-# ---------------------------------------------------------------------------
 
 def get_retriever(vector_store: Chroma, k: int = 5, metadata_filter: dict | None = None):
     """
-    Wrap the vector store as a retriever.
-
-    Args:
-        vector_store: A Chroma instance (from build or load).
-        k: Number of chunks to return per query. 5 is a good default —
-           enough context for the LLM, not so many that the prompt bloats.
-        metadata_filter: Optional ChromaDB filter dict, e.g. {"ticker": "AAPL"}
-           to restrict search to a specific company or filing year.
-
-    Returns:
-        A LangChain retriever. Call retriever.invoke("your question") to
-        get back a list of the k most relevant Document objects.
-
-    search_type="similarity" uses cosine similarity (the default).
-    In Week 2 we'll switch to "mmr" (Maximal Marginal Relevance) which
-    balances relevance with diversity to avoid returning 5 near-identical chunks.
+    Return a LangChain retriever. We call retriever.invoke("your question") to get back a list of the k most relevant Document objects.
     """
+
     search_kwargs: dict = {"k": k}
     if metadata_filter is not None:
         search_kwargs["filter"] = metadata_filter
@@ -117,9 +80,7 @@ def get_retriever(vector_store: Chroma, k: int = 5, metadata_filter: dict | None
     )
 
 
-# ---------------------------------------------------------------------------
-# Quick test
-# ---------------------------------------------------------------------------
+# Small test
 
 if __name__ == "__main__":
     import os

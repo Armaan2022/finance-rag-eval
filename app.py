@@ -13,13 +13,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── CSS ──────────────────────────────────────────────────────────────────────
 
 with open("style.css") as _f:
     st.markdown(f"<style>{_f.read()}</style>", unsafe_allow_html=True)
 
 
-# ── Cached data & pipeline ───────────────────────────────────────────────────
+# Cached data & pipeline
 
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_loaded_tickers() -> list[str]:
@@ -32,9 +31,7 @@ def load_pipeline(tickers_key: str):
     from src.retrieval.qdrant_store import load_qdrant_store, get_retriever, get_chunks_from_qdrant
     from src.retrieval.hybrid_search import HybridRetriever
 
-    # Load chunks from Qdrant payloads — no SEC EDGAR download needed here.
-    # tickers_key is only used as the cache key so stale entries are invalidated
-    # when tickers are added or removed.
+    # Load chunks from Qdrant payloads.
     chunks = get_chunks_from_qdrant()
     vector_store = load_qdrant_store()
 
@@ -54,17 +51,18 @@ def build_filtered_retriever(
     pipeline_choice, vector_store, chunks,
     ticker_filter=None, year_filter=None, doc_type_filter=None,
 ):
+    """
+    Build a retriever with metadata filters applied.
+    """
+
     from src.retrieval.qdrant_store import get_retriever
     from src.retrieval.hybrid_search import HybridRetriever
 
-    # Build a plain dict filter accepted by both get_retriever and HybridRetriever.
-    # List values are treated as OR (MatchAny) in both implementations.
     meta_filter: dict = {}
     if ticker_filter:
         meta_filter["ticker"] = ticker_filter
     if year_filter:
-        # Translate selected years → exact filing_date strings so Qdrant can filter
-        # by a keyword index rather than a string prefix (which it doesn't support).
+        # Translate selected years → exact filing_date strings so Qdrant can filter by a keyword index rather than a string.
         matching_dates = list({
             c.metadata["filing_date"]
             for c in chunks
@@ -89,7 +87,7 @@ def build_filtered_retriever(
     )
 
 
-# ── Navbar ───────────────────────────────────────────────────────────────────
+# Navbar
 
 def render_navbar(page: str):
     def nav_link(label: str, key: str) -> str:
@@ -126,16 +124,12 @@ def render_navbar(page: str):
     )
 
 
-# ── Filings panel ────────────────────────────────────────────────────────────
+# Filings panel
 
-# Beyond this many tickers the list switches from "size to fit" to a fixed
-# height with scrolling, so it can't grow forever.
+# Max height before scrolling, so the list doesn't grow forever.
 _FILINGS_MAX_VISIBLE_ROWS = 8
-# Only used once the cap above is exceeded — an approximate height for ~8
-# rows. It doesn't need to be pixel-exact: it just defines where scrolling
-# kicks in, not a "no empty space" guarantee like the auto-fit case below.
-_FILINGS_SCROLL_HEIGHT = 340
 
+_FILINGS_SCROLL_HEIGHT = 340
 
 def render_filings_panel(tickers: list[str]):
     st.markdown(
@@ -145,11 +139,6 @@ def render_filings_panel(tickers: list[str]):
         unsafe_allow_html=True,
     )
 
-    # Under the cap: no fixed height, so the container hugs its content
-    # exactly — there's no leftover space below the last row because we
-    # never guess a height, Streamlit just sizes it to what's rendered.
-    # Over the cap: a fixed height turns scrolling on instead of letting
-    # the panel grow forever.
     container_kwargs = {"key": "filings_list"}
     if len(tickers) > _FILINGS_MAX_VISIBLE_ROWS:
         container_kwargs["height"] = _FILINGS_SCROLL_HEIGHT
@@ -158,11 +147,6 @@ def render_filings_panel(tickers: list[str]):
         if not tickers:
             st.caption("No filings loaded.")
         for ticker in tickers:
-            # key=f"ticker_row_{ticker}" gives this row a stable
-            # "st-key-ticker_row_<ticker>" class. style.css uses it to lay
-            # out the label and the remove button side by side (label
-            # grows, button is a fixed 36x36 square) and to hide the
-            # button until the row is hovered.
             with st.container(key=f"ticker_row_{ticker}"):
                 c1, c2 = st.columns([6, 1])
                 c1.markdown(
@@ -210,7 +194,7 @@ def render_filings_panel(tickers: list[str]):
                     st.error(f"'{new_ticker}' not found on SEC EDGAR.")
 
 
-# ── Q&A tab ──────────────────────────────────────────────────────────────────
+# Q&A tab
 
 def render_qa_tab(retrievers, tickers, chunks, vector_store):
     col_filings, col_main, col_pipeline = st.columns([1, 2, 1], gap="large")
@@ -339,7 +323,7 @@ def render_qa_tab(retrievers, tickers, chunks, vector_store):
                     st.markdown(src["preview"])
 
 
-# ── Eval dashboard ───────────────────────────────────────────────────────────
+# Eval dashboard
 
 def render_eval_tab():
     st.markdown("## Pipeline Evaluation Results")
@@ -395,7 +379,7 @@ def render_eval_tab():
         st.line_chart(history)
 
 
-# ── About ────────────────────────────────────────────────────────────────────
+# About
 
 def render_about_tab():
     st.markdown("## About")
@@ -442,7 +426,7 @@ Key finding: vector-only retrieval outperforms hybrid on a small corpus — disc
     )
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# Main
 
 def main():
     if not os.getenv("OPENAI_API_KEY"):

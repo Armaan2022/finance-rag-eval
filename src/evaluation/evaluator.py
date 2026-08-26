@@ -15,7 +15,6 @@ from src.rag.pipeline import build_rag_chain
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "results"
 
 
-# Run one pipeline variant against all eval questions
 def run_pipeline_on_dataset(
     retriever,
     pipeline_name: str,
@@ -23,15 +22,7 @@ def run_pipeline_on_dataset(
     use_reranker: bool = False,
     top_n: int = 3,
 ) -> list[dict]:
-    """
-    Run a retriever + GPT-4o-mini chain over all eval questions.
-
-    Returns a list of result dicts with:
-      - question, ground_truth (from eval dataset)
-      - answer (LLM response)
-      - contexts (list of chunk texts that were retrieved)
-      - pipeline, ticker, category (for filtering results)
-    """
+    """Run the RAG chain over all eval questions and collect answers + contexts for RAGAS scoring."""
     chain = build_rag_chain(retriever)
     results = []
 
@@ -40,10 +31,9 @@ def run_pipeline_on_dataset(
     for i, item in enumerate(questions):
         question = item["question"]
 
-        # Get answer from the chain
         answer = chain.invoke({"question": question})
 
-        # Get the retrieved chunks (for context metrics)
+        # Re-retrieve here because the chain only returns the string answer
         if use_reranker:
             from src.retrieval.reranker import retrieve_and_rerank
             docs = retrieve_and_rerank(question, retriever, top_n=top_n)
@@ -68,19 +58,8 @@ def run_pipeline_on_dataset(
     return results
 
 
-# Score with RAGAS
 def score_with_ragas(results: list[dict]) -> dict:
-    """
-    Run RAGAS evaluation on a set of pipeline results.
-
-    RAGAS expects a HuggingFace Dataset with columns:
-      question, answer, contexts, ground_truth
-
-    It uses GPT-4o (via OpenAI) as the judge LLM internally.
-    Each metric scores 0-1; higher is better.
-
-    Returns a dict of metric_name → float score.
-    """
+    """Score a set of pipeline results with RAGAS. Returns a dict of metric_name → avg float score."""
     data_list = []
 
     for r in results:
@@ -94,8 +73,7 @@ def score_with_ragas(results: list[dict]) -> dict:
 
     dataset = Dataset.from_list(data_list)
 
-    # RAGAS uses its own LLM internally for judging — we point it to GPT-4o-mini
-    # to keep costs down. GPT-4o is more accurate but ~10x more expensive.
+    # RAGAS needs an LLM to judge quality and gpt-4o-mini is cheaper than gpt-4o.
     evaluator_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini", temperature=0))
 
     metrics = [
@@ -126,14 +104,8 @@ def score_with_ragas(results: list[dict]) -> dict:
     }
 
 
-# Save results to CSV
 def save_results(all_scores: list[dict], run_timestamp: str) -> Path:
-    """
-    Save per-pipeline scores to results/eval_metrics.csv.
-
-    Each row is one pipeline variant with its 4 RAGAS scores.
-    The CSV accumulates across runs so you can track improvement over time.
-    """
+    """Append per-pipeline RAGAS scores to results/eval_metrics.csv"""
     RESULTS_DIR.mkdir(exist_ok=True)
     csv_path = RESULTS_DIR / "eval_metrics.csv"
     file_exists = csv_path.exists()
@@ -180,10 +152,6 @@ if __name__ == "__main__":
 
     run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Exclude cross-company comparisons (ticker="BOTH") — single-pass retrieval
-    # isn't designed to simultaneously pull context from two companies, so those
-    # questions reliably underperform and skew the per-pipeline averages.
-    # Running 18 questions × 3 pipelines × RAGAS scoring ≈ $0.20-0.35
     QUESTIONS = [q for q in EVAL_QUESTIONS if q["ticker"] != "BOTH"]
 
     print("=== Loading pipeline components from Qdrant ===")
@@ -199,21 +167,21 @@ if __name__ == "__main__":
 
     all_scores = []
 
-    # --- Pipeline 1: vector only ---
+    # Pipeline 1: vector only
     print("\n=== Pipeline 1: Vector Only ===")
     v_results = run_pipeline_on_dataset(vector_retriever, "vector_only", QUESTIONS)
     print("  Scoring with RAGAS...")
     v_scores = score_with_ragas(v_results)
     all_scores.append({"pipeline": "vector_only", **v_scores})
 
-    # --- Pipeline 2: hybrid ---
+    # Pipeline 2: hybrid
     print("\n=== Pipeline 2: Hybrid (BM25 + Vector + RRF) ===")
     h_results = run_pipeline_on_dataset(hybrid_retriever, "hybrid", QUESTIONS)
     print("  Scoring with RAGAS...")
     h_scores = score_with_ragas(h_results)
     all_scores.append({"pipeline": "hybrid", **h_scores})
 
-    # --- Pipeline 3: hybrid + reranker ---
+    # Pipeline 3: hybrid + reranker
     print("\n=== Pipeline 3: Hybrid + Reranker ===")
     r_results = run_pipeline_on_dataset(
         hybrid_rerank_retriever, "hybrid_rerank", QUESTIONS,
@@ -223,7 +191,7 @@ if __name__ == "__main__":
     r_scores = score_with_ragas(r_results)
     all_scores.append({"pipeline": "hybrid_rerank", **r_scores})
 
-    # --- Save and print summary ---
+    # Save and print summary
     save_results(all_scores, run_timestamp)
 
     print("\n=== Results Summary ===")

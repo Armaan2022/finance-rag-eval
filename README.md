@@ -1,6 +1,6 @@
-# Finance RAG with Deep Evaluation
+# Finance RAG with Evaluation
 
-A production-grade **Retrieval-Augmented Generation (RAG)** system for querying SEC 10-K annual filings from Apple, Microsoft, and Google. Built to demonstrate that evaluation is not an afterthought — it's how you discover what actually works.
+A RAG system for querying SEC 10-K annual filings. You can load any public company's filing, ask questions, and get answers grounded in the actual documents with source attribution. The main thing I wanted to build here wasn't just a working RAG but a proper evaluation pipeline so I could measure what actually improves retrieval quality instead of guessing.
 
 **Live demo:** [https://finance-rag-eval-armaan.streamlit.app/]
 
@@ -8,7 +8,7 @@ A production-grade **Retrieval-Augmented Generation (RAG)** system for querying 
 
 ## The Problem
 
-LLMs hallucinate financial figures. A chatbot that confidently states the wrong revenue number is worse than no chatbot at all. This project grounds every answer in real SEC filings and measures retrieval quality with RAGAS — so claims are traceable and quality is measurable, not assumed.
+LLMs usually hallucinate financial figures. A system that confidently states the wrong revenue number is worse than no system at all. I wanted every answer to be traceable back to a real SEC filing, and I wanted to actually measure whether the retrieval was working, not just assume it was.
 
 ---
 
@@ -21,7 +21,7 @@ SEC EDGAR API (free, no auth)
 HTML parsing + XBRL noise removal
       │
       ▼
-RecursiveCharacterTextSplitter  (512 chars, 64 overlap)
+RecursiveCharacterTextSplitter  (1024 chars, 128 overlap)
       │
       ▼
 text-embedding-3-small  →  Qdrant Cloud (vector store)
@@ -36,22 +36,32 @@ Cross-encoder reranker  (ms-marco-MiniLM-L-6-v2)
 GPT-4o-mini with grounding prompt
       │
       ▼
-Answer + source attribution
+Answer + source attribution (company, filing date, 10-K section)
 ```
 
 ---
 
 ## Evaluation Results
 
-Measured with **RAGAS** across three pipeline variants on 10 hand-crafted Q&A pairs derived from the actual filings.
+Measured with **RAGAS** across three pipeline variants on 18 hand-crafted Q&A pairs covering financials, business strategy, and risk factors from AAPL and MSFT 10-K filings.
 
 | Pipeline | Faithfulness | Factual Correctness | Context Precision | Context Recall | **Avg** |
 |---|---|---|---|---|---|
-| Vector only | 0.867 | 0.426 | 0.695 | 0.700 | **0.672** |
-| Hybrid (BM25 + Vector + RRF) | 0.804 | 0.399 | 0.584 | 0.600 | 0.597 |
-| Hybrid + Reranker | 0.669 | 0.416 | 0.642 | 0.633 | 0.590 |
+| Vector only | **0.870** | 0.362 | 0.570 | 0.611 | **0.603** |
+| Hybrid (BM25 + Vector + RRF) | 0.699 | 0.344 | 0.486 | 0.597 | 0.532 |
+| Hybrid + Reranker | 0.479 | **0.409** | 0.519 | 0.472 | 0.470 |
 
-**Key finding:** Vector-only retrieval outperformed hybrid on this corpus. BM25 adds noise when term-frequency statistics are thin (only 2 filings per company). This was discovered through the evaluation layer — not assumed. On a larger corpus, the hybrid advantage would likely emerge.
+**Key findings:**
+
+- Vector-only retrieval won overall, which surprised me. BM25 is supposed to help but it added noise here since the dataset is too small and domain-specific for keyword statistics to be meaningful. On a larger, more diverse corpus I'd expect hybrid to perform better. 
+- Chunk size made a bigger difference than pipeline complexity. Switching from 512 to 1024 chars pushed faithfulness from ~0.47 to 0.87. Larger chunks give the LLM wider context, so it stays grounded in the source.
+- The reranker had the best factual correctness (0.41) but worst recall (0.47). It's precise when it gets the right chunks but too aggressive at filtering, so the LLM ends up with less context overall.
+- Faithfulness is the metric I care about most here. 0.87 means the system is rarely making claims that aren't in the retrieved documents.
+
+To re-run the evaluation:
+```bash
+python -m src.evaluation.evaluator
+```
 
 ---
 
@@ -89,15 +99,12 @@ QDRANT_URL=https://your-cluster.qdrant.io
 QDRANT_API_KEY=your-key
 ```
 
-Upload vectors to Qdrant Cloud (one-time):
-```bash
-python -m scripts.upload_to_qdrant
-```
-
 Run the app:
 ```bash
 streamlit run app.py
 ```
+
+Use the **Load filing** form in the app to add any public company by ticker. Filings are fetched from SEC EDGAR, chunked, embedded, and uploaded to Qdrant automatically.
 
 ---
 
@@ -106,13 +113,14 @@ streamlit run app.py
 ```
 src/
 ├── ingestion/     # SEC EDGAR download + HTML parsing
-├── processing/    # Document chunking
-├── retrieval/     # Vector store, BM25, hybrid search, reranker
+├── processing/    # Document chunking + section detection
+├── retrieval/     # Qdrant store, BM25, hybrid search, reranker
 ├── rag/           # LangChain pipeline + prompt
 └── evaluation/    # RAGAS eval dataset + evaluator
 scripts/
-└── upload_to_qdrant.py   # One-time vector upload
+└── upload_to_qdrant.py   # Bulk upload script (optional)
 results/
 └── eval_metrics.csv      # Evaluation results across runs
 app.py                    # Streamlit UI
+style.css                 # Theme styles
 ```
