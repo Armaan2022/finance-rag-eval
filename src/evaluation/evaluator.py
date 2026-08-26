@@ -120,7 +120,7 @@ def score_with_ragas(results: list[dict]) -> dict:
 
     return {
         "faithfulness": avg("faithfulness"),
-        "answer_relevancy": avg("factual_correctness(mode=f1)"),
+        "factual_correctness": avg("factual_correctness(mode=f1)"),
         "context_precision": avg("llm_context_precision_with_reference"),
         "context_recall": avg("context_recall"),
     }
@@ -140,7 +140,7 @@ def save_results(all_scores: list[dict], run_timestamp: str) -> Path:
 
     fieldnames = [
         "timestamp", "pipeline",
-        "faithfulness", "answer_relevancy",
+        "faithfulness", "factual_correctness",
         "context_precision", "context_recall",
         "avg_score",
     ]
@@ -152,14 +152,14 @@ def save_results(all_scores: list[dict], run_timestamp: str) -> Path:
 
         for row in all_scores:
             avg = (
-                row["faithfulness"] + row["answer_relevancy"] +
+                row["faithfulness"] + row["factual_correctness"] +
                 row["context_precision"] + row["context_recall"]
             ) / 4
             writer.writerow({
                 "timestamp": run_timestamp,
                 "pipeline": row["pipeline"],
                 "faithfulness": f"{row['faithfulness']:.4f}",
-                "answer_relevancy": f"{row['answer_relevancy']:.4f}",
+                "factual_correctness": f"{row['factual_correctness']:.4f}",
                 "context_precision": f"{row['context_precision']:.4f}",
                 "context_recall": f"{row['context_recall']:.4f}",
                 "avg_score": f"{avg:.4f}",
@@ -173,28 +173,24 @@ def save_results(all_scores: list[dict], run_timestamp: str) -> Path:
 if __name__ == "__main__":
     import os
     from dotenv import load_dotenv
-    from src.ingestion.sec_edgar import ingest_tickers
-    from src.processing.chunker import chunk_documents
-    from src.retrieval.vector_store import load_vector_store, build_vector_store, get_retriever
+    from src.retrieval.qdrant_store import load_qdrant_store, get_retriever, get_chunks_from_qdrant
     from src.retrieval.hybrid_search import HybridRetriever
 
     load_dotenv()
 
-    CHROMA_DIR = Path(__file__).resolve().parents[2] / "chroma_db"
     run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Use a subset for quick iteration — swap to EVAL_QUESTIONS for full eval
-    # Running all 20 questions × 3 pipelines × RAGAS scoring ≈ $0.10-0.20
-    QUESTIONS = EVAL_QUESTIONS[:10]
+    # Exclude cross-company comparisons (ticker="BOTH") — single-pass retrieval
+    # isn't designed to simultaneously pull context from two companies, so those
+    # questions reliably underperform and skew the per-pipeline averages.
+    # Running 18 questions × 3 pipelines × RAGAS scoring ≈ $0.20-0.35
+    QUESTIONS = [q for q in EVAL_QUESTIONS if q["ticker"] != "BOTH"]
 
-    print("=== Loading pipeline components ===")
-    documents = ingest_tickers(["AAPL", "MSFT"], max_filings_per_ticker=1)
-    chunks = chunk_documents(documents, config_name="medium")
+    print("=== Loading pipeline components from Qdrant ===")
+    chunks = get_chunks_from_qdrant()
+    vector_store = load_qdrant_store()
 
-    if CHROMA_DIR.exists() and any(CHROMA_DIR.iterdir()):
-        vector_store = load_vector_store()
-    else:
-        vector_store = build_vector_store(chunks)
+    print(f"  Loaded {len(chunks)} chunks from Qdrant")
 
     # --- Define the 3 retrievers ---
     vector_retriever = get_retriever(vector_store, k=5)
@@ -231,17 +227,17 @@ if __name__ == "__main__":
     save_results(all_scores, run_timestamp)
 
     print("\n=== Results Summary ===")
-    print(f"{'Pipeline':<20} {'Faithful':>9} {'Relevancy':>10} {'Precision':>10} {'Recall':>8} {'Avg':>7}")
+    print(f"{'Pipeline':<20} {'Faithful':>9} {'Factual':>8} {'Precision':>10} {'Recall':>8} {'Avg':>7}")
     print("-" * 68)
     for row in all_scores:
         avg = sum([
-            row["faithfulness"], row["answer_relevancy"],
+            row["faithfulness"], row["factual_correctness"],
             row["context_precision"], row["context_recall"]
         ]) / 4
         print(
             f"{row['pipeline']:<20} "
             f"{row['faithfulness']:>9.4f} "
-            f"{row['answer_relevancy']:>10.4f} "
+            f"{row['factual_correctness']:>8.4f} "
             f"{row['context_precision']:>10.4f} "
             f"{row['context_recall']:>8.4f} "
             f"{avg:>7.4f}"

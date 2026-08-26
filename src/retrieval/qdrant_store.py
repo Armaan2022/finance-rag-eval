@@ -58,38 +58,104 @@ def build_qdrant_store(chunks: list[Document]) -> QdrantVectorStore:
     return vector_store
 
 
+def _ensure_payload_indexes(client: QdrantClient) -> None:
+    """
+    Create payload indexes required for filtered search and delete.
+    Qdrant needs a keyword index on metadata.ticker before any filter
+    on that field can be used in a query. Safe to call repeatedly.
+    """
+    from qdrant_client.models import PayloadSchemaType
+    for field in ("metadata.ticker", "metadata.filing_date", "metadata.form_type"):
+        client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name=field,
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+
+
 def load_qdrant_store() -> QdrantVectorStore:
     """
     Connect to an existing Qdrant collection without re-embedding.
     This is what the app calls on every startup.
     """
+    client = _get_client()
+    _ensure_payload_indexes(client)
     return QdrantVectorStore(
-        client=_get_client(),
+        client=client,
         collection_name=COLLECTION_NAME,
         embedding=get_embeddings(),
     )
 
 
-def upload_ticker_chunks(chunks: list[Document]) -> None:
+def upload_ticker_chunks(chunks: list[Document], batch_size: int = 32) -> None:
     """Add chunks for a new ticker to an existing Qdrant collection."""
     vector_store = load_qdrant_store()
-    vector_store.add_documents(chunks)
+    for i in range(0, len(chunks), batch_size):
+        vector_store.add_documents(chunks[i : i + batch_size])
     print(f"  Uploaded {len(chunks)} chunks to Qdrant Cloud.")
 
 
 def delete_ticker_vectors(ticker: str) -> None:
     """Delete all vectors for a given ticker from Qdrant."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue, FilterSelector
     client = _get_client()
-    client.delete(
-        collection_name=COLLECTION_NAME,
-        points_selector=FilterSelector(
-            filter=Filter(
-                must=[FieldCondition(key="metadata.ticker", match=MatchValue(value=ticker.upper()))]
-            )
-        ),
-    )
-    print(f"  Deleted vectors for {ticker} from Qdrant.")
+    ticker_upper = ticker.upper()
+    ids_to_delete: list = []
+    offset = None
+
+    # Scroll without a filter (no index required), collect matching IDs client-side
+    while True:
+        results, next_offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=1000,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in results:
+            if point.payload.get("metadata", {}).get("ticker") == ticker_upper:
+                ids_to_delete.append(point.id)
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    if ids_to_delete:
+        client.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=ids_to_delete,
+        )
+
+    print(f"  Deleted {len(ids_to_delete)} vectors for {ticker_upper} from Qdrant.")
+
+
+def get_chunks_from_qdrant() -> list[Document]:
+    """
+    Reconstruct all stored Document chunks from Qdrant payloads.
+    LangChain stores page_content and metadata in the payload at upload time,
+    so we never need to re-download from SEC EDGAR just to rebuild BM25.
+    """
+    client = _get_client()
+    docs: list[Document] = []
+    offset = None
+
+    while True:
+        results, next_offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=1000,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in results:
+            payload = point.payload
+            docs.append(Document(
+                page_content=payload.get("page_content", ""),
+                metadata=payload.get("metadata", {}),
+            ))
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    return docs
 
 
 def get_tickers_from_qdrant() -> list[str]:

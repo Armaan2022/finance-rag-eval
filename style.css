@@ -1,0 +1,208 @@
+/* ── Global ── */
+[data-testid="stSidebar"],
+[data-testid="stSidebarCollapseButton"] { display: none !important; }
+[data-testid="stHeader"] { display: none !important; }
+#MainMenu, footer { visibility: hidden; }
+
+.stApp { background: #0d1117 !important; }
+
+.block-container {
+    padding-top: 0 !important;
+    padding-bottom: 2rem !important;
+    max-width: 1200px !important;
+}
+
+/* ── Typography ── */
+h1, h2, h3 {
+    color: #e6edf3 !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.01em !important;
+}
+p, li { color: #c9d1d9 !important; }
+label { color: #8b949e !important; font-size: 13px !important; }
+[data-testid="stCaptionContainer"] p {
+    color: #7d8590 !important;
+    font-size: 12px !important;
+}
+
+/* ── Inputs ── */
+[data-testid="stTextInput"] > div > div > input {
+    background: #161b22 !important;
+    border: 1px solid #30363d !important;
+    color: #e6edf3 !important;
+    border-radius: 6px !important;
+    font-size: 14px !important;
+}
+[data-testid="stTextInput"] input::placeholder { color: #484f58 !important; }
+[data-testid="stTextInput"] input:focus {
+    border-color: #1f6feb !important;
+    box-shadow: 0 0 0 3px rgba(31,111,235,0.12) !important;
+    outline: none !important;
+}
+
+/* ── Selectbox ── */
+[data-testid="stSelectbox"] > div > div {
+    background: #161b22 !important;
+    border: 1px solid #30363d !important;
+    color: #e6edf3 !important;
+    border-radius: 6px !important;
+}
+
+/* ── Multiselect ── */
+[data-testid="stMultiSelect"] > div > div {
+    background: #161b22 !important;
+    border: 1px solid #30363d !important;
+    border-radius: 6px !important;
+}
+
+/* ── Buttons ── */
+[data-testid="stBaseButton-secondary"] {
+    background: #21262d !important;
+    border: 1px solid #30363d !important;
+    color: #c9d1d9 !important;
+    border-radius: 6px !important;
+    font-size: 13px !important;
+}
+[data-testid="stBaseButton-secondary"]:hover {
+    border-color: #8b949e !important;
+    background: #30363d !important;
+    color: #f0f6fc !important;
+}
+[data-testid="stBaseButton-primary"] {
+    background: #1f6feb !important;
+    border: 1px solid #388bfd !important;
+    color: #fff !important;
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+    font-size: 14px !important;
+}
+[data-testid="stBaseButton-primary"]:hover { background: #388bfd !important; }
+
+/* ── Form ── */
+[data-testid="stForm"] {
+    border: none !important;
+    padding: 0 !important;
+    background: transparent !important;
+}
+
+/* ── Expander ── */
+[data-testid="stExpander"] details {
+    background: #161b22 !important;
+    border: 1px solid #21262d !important;
+    border-radius: 6px !important;
+}
+[data-testid="stExpander"] summary { color: #c9d1d9 !important; }
+
+/* ── Divider ── */
+hr { border-top: 1px solid #21262d !important; margin: 1rem 0 !important; }
+
+/* ── Dataframe ── */
+[data-testid="stDataFrame"] {
+    border: 1px solid #21262d !important;
+    border-radius: 8px !important;
+    overflow: hidden !important;
+}
+
+/* ── Code ── */
+code {
+    background: #161b22 !important;
+    color: #e6edf3 !important;
+    border-radius: 4px !important;
+    padding: 2px 5px !important;
+}
+pre {
+    background: #161b22 !important;
+    border: 1px solid #30363d !important;
+    border-radius: 8px !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* Loaded filings list                                                         */
+/*                                                                              */
+/* Targeted via st.container(key=...) in app.py, which gives each element a    */
+/* stable "st-key-<key>" class regardless of Streamlit's internal DOM. Plain   */
+/* side-by-side flex layout — no absolute positioning, nothing that depends    */
+/* on Streamlit's own internal positioning context.                           */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+/* Scrollable wrapper, only present once tickers exceed the cap
+   (st.container(height=..., key="filings_list")) */
+.st-key-filings_list {
+    scrollbar-width: thin;
+    scrollbar-color: #30363d transparent;
+}
+.st-key-filings_list [data-testid="stVerticalBlock"] {
+    gap: 0 !important;
+}
+
+/* Each row — st.container(key=f"ticker_row_{ticker}") */
+div[class*="st-key-ticker_row_"] {
+    margin-bottom: 8px;
+}
+div[class*="st-key-ticker_row_"]:last-child {
+    margin-bottom: 0;
+}
+
+/* Label column grows to fill the row; button column is a fixed 36px square,
+   with a small gap between the two. */
+div[class*="st-key-ticker_row_"] [data-testid="stHorizontalBlock"] {
+    display: flex !important;
+    gap: 8px !important;
+    align-items: stretch !important;
+}
+div[class*="st-key-ticker_row_"] [data-testid="column"] {
+    padding: 0 !important;
+    min-height: 0 !important;
+}
+div[class*="st-key-ticker_row_"] [data-testid="column"]:first-child {
+    flex: 1 1 auto !important;
+    width: auto !important;
+}
+div[class*="st-key-ticker_row_"] [data-testid="column"]:last-child {
+    flex: 0 0 36px !important;
+    width: 36px !important;
+}
+
+/* Ticker label pill */
+.ticker-row-label {
+    display: flex;
+    align-items: center;
+    height: 36px;
+    font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: #c9d1d9;
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 0 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Remove ("×") button — a plain 36x36 square matching the pill's height,
+   hidden until the row is hovered, red "×" with no fill or border. */
+div[class*="st-key-ticker_row_"] button {
+    all: unset !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 36px !important;
+    height: 36px !important;
+    cursor: pointer !important;
+    color: #dc2626 !important;
+    font-size: 18px !important;
+    font-weight: 700 !important;
+    line-height: 1 !important;
+    border-radius: 6px !important;
+    opacity: 0 !important;
+    transition: opacity 0.12s ease, color 0.12s ease !important;
+}
+div[class*="st-key-ticker_row_"]:hover button {
+    opacity: 1 !important;
+}
+div[class*="st-key-ticker_row_"] button:hover {
+    color: #ef4444 !important;
+}

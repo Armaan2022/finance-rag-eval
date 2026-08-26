@@ -6,18 +6,11 @@ from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 
 
-# ---------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
 
-# ChromaDB stores its data in this folder. It persists between runs so you
-# don't re-embed everything every time the script runs.
 CHROMA_DIR = Path(__file__).resolve().parents[2] / "chroma_db"
 
-# text-embedding-3-small: OpenAI's efficient embedding model.
-# 1,536 dimensions, cheap (~$0.00002 per 1k tokens), fast.
-# text-embedding-3-large has 3,072 dims and is more accurate but costs more.
-# For a portfolio project, small is the right tradeoff.
+# text-embedding-3-small: OpenAI's efficient embedding model, 1,536 dimensions, cheap, fast.
 EMBEDDING_MODEL = "text-embedding-3-small"
 
 # Each filing type gets its own ChromaDB collection so we can filter by it

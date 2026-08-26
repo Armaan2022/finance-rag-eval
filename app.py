@@ -3,107 +3,23 @@ import os
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from src.rag.pipeline import _sentence_preview
 
 load_dotenv()
 
 st.set_page_config(
     page_title="Finance RAG",
-    page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-# ---------------------------------------------------------------------------
-# CSS
-# ---------------------------------------------------------------------------
+# ── CSS ──────────────────────────────────────────────────────────────────────
 
-st.markdown("""
-<style>
-
-/* Hide sidebar collapse arrow */
-[data-testid="stSidebarCollapseButton"] { display: none !important; }
-
-/* Tighten all vertical spacing in sidebar */
-section[data-testid="stSidebar"] > div { padding-top: 1.2rem !important; }
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0 !important; }
-[data-testid="stSidebar"] hr { margin: 0.45rem 0 !important; }
-[data-testid="stSidebar"] p { margin-bottom: 0 !important; font-size: 13px; }
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] { margin: 0 !important; }
-[data-testid="stSidebar"] [data-testid="stCaptionContainer"] { margin: 0 0 2px 0 !important; }
-/* Remove form border */
-[data-testid="stSidebar"] [data-testid="stForm"] {
-    border: none !important;
-    padding: 0 !important;
-    background: transparent !important;
-}
-
-/* ── Nav tabs: radio styled as clickable items ── */
-/* Hide label above radio group */
-[data-testid="stSidebar"] [data-testid="stRadio"] > label { display: none !important; }
-/* Hide radio circles */
-[data-testid="stSidebar"] [data-testid="stRadio"] [data-baseweb="radio"] > div:first-child {
-    display: none !important;
-}
-/* Each nav item */
-[data-testid="stSidebar"] [data-testid="stRadio"] [data-baseweb="radio"] {
-    padding: 7px 10px !important;
-    border-radius: 6px !important;
-    cursor: pointer !important;
-    color: rgba(255,255,255,0.45) !important;
-    transition: background 0.15s, color 0.15s !important;
-    width: 100% !important;
-    font-size: 13px !important;
-}
-[data-testid="stSidebar"] [data-testid="stRadio"] [data-baseweb="radio"]:hover {
-    background: rgba(255,255,255,0.08) !important;
-    color: rgba(255,255,255,0.9) !important;
-}
-/* Selected nav item */
-[data-testid="stSidebar"] [data-testid="stRadio"] [data-checked="true"][data-baseweb="radio"],
-[data-testid="stSidebar"] [data-testid="stRadio"] [aria-checked="true"] {
-    background: rgba(255,255,255,0.14) !important;
-    color: #fff !important;
-    font-weight: 600 !important;
-}
-
-/* ── Filing cards ── */
-[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
-    background: rgba(255,255,255,0.07) !important;
-    border: none !important;
-    border-radius: 6px !important;
-    padding: 0 6px !important;
-    margin: 2px 0 !important;
-}
-[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] p {
-    font-size: 13px !important;
-    line-height: 2.2 !important;
-}
-
-/* ── Hover delete: × hidden by default, shown on card hover ── */
-[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] button {
-    opacity: 0 !important;
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    color: #ff4b4b !important;
-    font-size: 13px !important;
-    font-weight: bold !important;
-    padding: 0 4px !important;
-    min-height: 28px !important;
-    height: 28px !important;
-    transition: opacity 0.15s !important;
-}
-[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:hover button {
-    opacity: 1 !important;
-}
-
-</style>
-""", unsafe_allow_html=True)
+with open("style.css") as _f:
+    st.markdown(f"<style>{_f.read()}</style>", unsafe_allow_html=True)
 
 
-# ---------------------------------------------------------------------------
-# Ticker list — derived from Qdrant (single source of truth)
-# ---------------------------------------------------------------------------
+# ── Cached data & pipeline ───────────────────────────────────────────────────
 
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_loaded_tickers() -> list[str]:
@@ -111,20 +27,15 @@ def fetch_loaded_tickers() -> list[str]:
     return get_tickers_from_qdrant()
 
 
-# ---------------------------------------------------------------------------
-# Pipeline (cached per ticker set)
-# ---------------------------------------------------------------------------
-
-@st.cache_resource(show_spinner="Loading pipeline...")
+@st.cache_resource(show_spinner=False)
 def load_pipeline(tickers_key: str):
-    from src.ingestion.sec_edgar import ingest_tickers
-    from src.processing.chunker import chunk_documents
-    from src.retrieval.qdrant_store import load_qdrant_store, get_retriever
+    from src.retrieval.qdrant_store import load_qdrant_store, get_retriever, get_chunks_from_qdrant
     from src.retrieval.hybrid_search import HybridRetriever
 
-    tickers = tickers_key.split(",")
-    documents = ingest_tickers(tickers, max_filings_per_ticker=2)
-    chunks = chunk_documents(documents, config_name="medium")
+    # Load chunks from Qdrant payloads — no SEC EDGAR download needed here.
+    # tickers_key is only used as the cache key so stale entries are invalidated
+    # when tickers are added or removed.
+    chunks = get_chunks_from_qdrant()
     vector_store = load_qdrant_store()
 
     retrievers = {
@@ -139,55 +50,126 @@ def load_pipeline(tickers_key: str):
     return retrievers, chunks, vector_store
 
 
-# ---------------------------------------------------------------------------
-# Build a filtered retriever on demand
-# ---------------------------------------------------------------------------
-
-def build_filtered_retriever(pipeline_choice, vector_store, chunks, ticker_filter):
+def build_filtered_retriever(
+    pipeline_choice, vector_store, chunks,
+    ticker_filter=None, year_filter=None, doc_type_filter=None,
+):
     from src.retrieval.qdrant_store import get_retriever
     from src.retrieval.hybrid_search import HybridRetriever
-    from qdrant_client.models import Filter, FieldCondition, MatchAny
 
-    qdrant_filter = Filter(must=[
-        FieldCondition(key="metadata.ticker", match=MatchAny(any=ticker_filter))
-    ])
-    bm25_filter = {"ticker": ticker_filter}  # dict used for BM25 chunk filtering
+    # Build a plain dict filter accepted by both get_retriever and HybridRetriever.
+    # List values are treated as OR (MatchAny) in both implementations.
+    meta_filter: dict = {}
+    if ticker_filter:
+        meta_filter["ticker"] = ticker_filter
+    if year_filter:
+        # Translate selected years → exact filing_date strings so Qdrant can filter
+        # by a keyword index rather than a string prefix (which it doesn't support).
+        matching_dates = list({
+            c.metadata["filing_date"]
+            for c in chunks
+            if c.metadata.get("filing_date", "")[:4] in year_filter
+            and (not ticker_filter or c.metadata.get("ticker") in ticker_filter)
+        })
+        if matching_dates:
+            meta_filter["filing_date"] = matching_dates
+    if doc_type_filter:
+        meta_filter["form_type"] = doc_type_filter
+
+    effective_filter = meta_filter or None
     k = 20 if pipeline_choice == "Hybrid + Reranker" else 5
-
     if pipeline_choice == "Vector only":
-        return get_retriever(vector_store, k=k, metadata_filter=qdrant_filter)
+        return get_retriever(vector_store, k=k, metadata_filter=effective_filter)
     return HybridRetriever(
         vector_store=vector_store,
         chunks=chunks,
         k=k,
         fetch_k=20,
-        metadata_filter=bm25_filter,
+        metadata_filter=effective_filter,
     )
 
 
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
+# ── Navbar ───────────────────────────────────────────────────────────────────
 
-def render_sidebar(tickers: list[str]) -> tuple[list[str], str]:
-    with st.sidebar:
-        st.markdown("### 📊 Finance RAG")
-        st.divider()
-
-        page = st.radio(
-            "nav",
-            ["💬  Q&A", "📈  Eval Dashboard", "ℹ️  About"],
-            label_visibility="collapsed",
+def render_navbar(page: str):
+    def nav_link(label: str, key: str) -> str:
+        active = page == key
+        color = "#f0f6fc" if active else "#7d8590"
+        bg = "rgba(177,186,196,0.1)" if active else "transparent"
+        weight = "500" if active else "400"
+        return (
+            f'<a href="?page={key}" target="_self" style="'
+            f"text-decoration:none;color:{color};font-size:14px;"
+            f"padding:6px 14px;border-radius:6px;margin-right:2px;"
+            f"background:{bg};font-weight:{weight};"
+            f'">{label}</a>'
         )
 
-        st.divider()
-        st.caption(f"Loaded Filings · {len(tickers)} tickers")
+    st.markdown(
+        f"""
+        <div style="
+            display:flex;align-items:center;
+            padding:16px 0;
+            border-bottom:1px solid #21262d;
+            margin-bottom:28px;
+        ">
+            <span style="
+                font-size:15px;font-weight:600;color:#f0f6fc;
+                margin-right:28px;letter-spacing:-0.01em;
+            ">Finance RAG</span>
+            {nav_link("Q&A", "qa")}
+            {nav_link("Eval Dashboard", "eval")}
+            {nav_link("About", "about")}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
+
+# ── Filings panel ────────────────────────────────────────────────────────────
+
+# Beyond this many tickers the list switches from "size to fit" to a fixed
+# height with scrolling, so it can't grow forever.
+_FILINGS_MAX_VISIBLE_ROWS = 8
+# Only used once the cap above is exceeded — an approximate height for ~8
+# rows. It doesn't need to be pixel-exact: it just defines where scrolling
+# kicks in, not a "no empty space" guarantee like the auto-fit case below.
+_FILINGS_SCROLL_HEIGHT = 340
+
+
+def render_filings_panel(tickers: list[str]):
+    st.markdown(
+        '<p style="font-size:11px;font-weight:600;color:#7d8590;'
+        'letter-spacing:0.08em;text-transform:uppercase;margin:0 0 8px 0;">'
+        "Loaded Filings</p>",
+        unsafe_allow_html=True,
+    )
+
+    # Under the cap: no fixed height, so the container hugs its content
+    # exactly — there's no leftover space below the last row because we
+    # never guess a height, Streamlit just sizes it to what's rendered.
+    # Over the cap: a fixed height turns scrolling on instead of letting
+    # the panel grow forever.
+    container_kwargs = {"key": "filings_list"}
+    if len(tickers) > _FILINGS_MAX_VISIBLE_ROWS:
+        container_kwargs["height"] = _FILINGS_SCROLL_HEIGHT
+
+    with st.container(**container_kwargs):
+        if not tickers:
+            st.caption("No filings loaded.")
         for ticker in tickers:
-            with st.container(border=True):
-                col1, col2 = st.columns([5, 1])
-                col1.markdown(ticker)
-                if col2.button("✕", key=f"remove_{ticker}", help=f"Remove {ticker}"):
+            # key=f"ticker_row_{ticker}" gives this row a stable
+            # "st-key-ticker_row_<ticker>" class. style.css uses it to lay
+            # out the label and the remove button side by side (label
+            # grows, button is a fixed 36x36 square) and to hide the
+            # button until the row is hovered.
+            with st.container(key=f"ticker_row_{ticker}"):
+                c1, c2 = st.columns([6, 1])
+                c1.markdown(
+                    f'<div class="ticker-row-label">{ticker}</div>',
+                    unsafe_allow_html=True,
+                )
+                if c2.button("×", key=f"rm_{ticker}", help=f"Remove {ticker}"):
                     with st.spinner(f"Removing {ticker}..."):
                         from src.retrieval.qdrant_store import delete_ticker_vectors
                         delete_ticker_vectors(ticker)
@@ -195,70 +177,90 @@ def render_sidebar(tickers: list[str]) -> tuple[list[str], str]:
                     load_pipeline.clear()
                     st.rerun()
 
-        st.divider()
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-        with st.form("add_ticker_form", clear_on_submit=True):
-            new_ticker = st.text_input(
-                "ticker", placeholder="Add ticker  e.g. NVDA",
-                label_visibility="collapsed"
-            ).strip().upper()
-            submitted = st.form_submit_button("Load filings", use_container_width=True)
+    with st.form("add_ticker_form", clear_on_submit=True):
+        new_ticker = st.text_input(
+            "ticker",
+            placeholder="Ticker, e.g. NVDA",
+            label_visibility="collapsed",
+        ).strip().upper()
+        submitted = st.form_submit_button("Load filing", use_container_width=True)
 
-        if submitted and new_ticker:
-            if new_ticker in tickers:
-                st.error(f"{new_ticker} is already loaded.")
-            else:
-                with st.spinner(f"Fetching {new_ticker} from SEC EDGAR..."):
-                    try:
-                        from src.ingestion.sec_edgar import get_cik_from_ticker, ingest_tickers
-                        get_cik_from_ticker(new_ticker)
-                        documents = ingest_tickers([new_ticker], max_filings_per_ticker=2)
-                        if not documents:
-                            st.error(f"No 10-K filings found for {new_ticker}.")
-                        else:
-                            from src.processing.chunker import chunk_documents
-                            from src.retrieval.qdrant_store import upload_ticker_chunks
-                            chunks = chunk_documents(documents, config_name="medium")
-                            upload_ticker_chunks(chunks)
-                            fetch_loaded_tickers.clear()
-                            load_pipeline.clear()
-                            st.rerun()
-                    except ValueError:
-                        st.error(f"'{new_ticker}' not found on SEC EDGAR.")
-
-    return tickers, page
+    if submitted and new_ticker:
+        if new_ticker in tickers:
+            st.error(f"{new_ticker} is already loaded.")
+        else:
+            with st.spinner(f"Fetching {new_ticker} from SEC EDGAR..."):
+                try:
+                    from src.ingestion.sec_edgar import get_cik_from_ticker, ingest_tickers
+                    get_cik_from_ticker(new_ticker)
+                    documents = ingest_tickers([new_ticker], max_filings_per_ticker=2)
+                    if not documents:
+                        st.error(f"No 10-K filings found for {new_ticker}.")
+                    else:
+                        from src.processing.chunker import chunk_documents
+                        from src.retrieval.qdrant_store import upload_ticker_chunks
+                        chunks = chunk_documents(documents, config_name="large")
+                        upload_ticker_chunks(chunks)
+                        fetch_loaded_tickers.clear()
+                        load_pipeline.clear()
+                        st.rerun()
+                except ValueError:
+                    st.error(f"'{new_ticker}' not found on SEC EDGAR.")
 
 
-# ---------------------------------------------------------------------------
-# Q&A tab
-# ---------------------------------------------------------------------------
+# ── Q&A tab ──────────────────────────────────────────────────────────────────
 
 def render_qa_tab(retrievers, tickers, chunks, vector_store):
-    st.header("Ask questions about SEC 10-K filings")
+    col_filings, col_main, col_pipeline = st.columns([1, 2, 1], gap="large")
 
-    col_main, col_side = st.columns([2, 1])
+    with col_filings:
+        render_filings_panel(tickers)
 
-    with col_side:
+    with col_pipeline:
+        st.markdown(
+            '<p style="font-size:11px;font-weight:600;color:#7d8590;'
+            'letter-spacing:0.08em;text-transform:uppercase;margin:0 0 6px 0;">'
+            "Pipeline</p>",
+            unsafe_allow_html=True,
+        )
         pipeline_choice = st.selectbox(
             "Pipeline",
             options=list(retrievers.keys()),
-            help="Vector only: pure semantic search\nHybrid: adds BM25 keyword search\nHybrid + Reranker: cross-encoder precision pass",
+            label_visibility="collapsed",
+            help=(
+                "Vector only: pure semantic search\n"
+                "Hybrid: BM25 keyword + semantic + RRF fusion\n"
+                "Hybrid + Reranker: cross-encoder precision pass"
+            ),
         )
 
+        st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+
         with st.expander("Filters", expanded=False):
-            ticker_filter = st.multiselect("Company", options=tickers, placeholder="All companies")
+            ticker_filter = st.multiselect(
+                "Company", options=tickers, placeholder="All companies"
+            )
+            available_years = sorted(
+                {c.metadata["filing_date"][:4] for c in chunks if c.metadata.get("filing_date")},
+                reverse=True,
+            )
+            year_filter = st.multiselect(
+                "Filing year", options=available_years, placeholder="All years"
+            )
+            doc_types = sorted({c.metadata.get("form_type", "10-K") for c in chunks})
+            doc_type_filter = st.multiselect(
+                "Document type", options=doc_types, placeholder="All types"
+            )
 
-            available_years = sorted(set(
-                c.metadata["filing_date"][:4]
-                for c in chunks if c.metadata.get("filing_date")
-            ), reverse=True)
-            year_filter = st.multiselect("Filing year", options=available_years, placeholder="All years")
-
-            doc_types = sorted(set(c.metadata.get("form_type", "10-K") for c in chunks))
-            doc_type_filter = st.multiselect("Document type", options=doc_types, placeholder="All types")
-
-        st.divider()
-        st.markdown("**Example questions**")
+        st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            '<p style="font-size:11px;font-weight:600;color:#7d8590;'
+            'letter-spacing:0.08em;text-transform:uppercase;margin:0 0 8px 0;">'
+            "Example Questions</p>",
+            unsafe_allow_html=True,
+        )
         examples = [
             "What was Apple's total revenue in 2025?",
             "What are Microsoft's three business segments?",
@@ -273,21 +275,28 @@ def render_qa_tab(retrievers, tickers, chunks, vector_store):
 
     with col_main:
         query = st.text_input(
-            "Your question",
+            "Question",
             value=st.session_state.get("query", ""),
             placeholder="e.g. What was Apple's net income in fiscal year 2025?",
+            label_visibility="collapsed",
         )
 
         if st.button("Ask", type="primary", use_container_width=True) and query:
             retriever = (
-                build_filtered_retriever(pipeline_choice, vector_store, chunks, ticker_filter)
-                if ticker_filter else retrievers[pipeline_choice]
+                build_filtered_retriever(
+                    pipeline_choice, vector_store, chunks,
+                    ticker_filter=ticker_filter,
+                    year_filter=year_filter,
+                    doc_type_filter=doc_type_filter,
+                )
+                if (ticker_filter or year_filter or doc_type_filter)
+                else retrievers[pipeline_choice]
             )
 
             with st.spinner("Retrieving and generating answer..."):
                 from src.rag.pipeline import build_rag_chain, ask
 
-                use_reranker = (pipeline_choice == "Hybrid + Reranker")
+                use_reranker = pipeline_choice == "Hybrid + Reranker"
                 chain = build_rag_chain(retriever)
                 result = ask(chain, retriever, query)
 
@@ -297,39 +306,44 @@ def render_qa_tab(retrievers, tickers, chunks, vector_store):
                     result["sources"] = [
                         {
                             "ticker": d.metadata.get("ticker", "?"),
+                            "company_name": d.metadata.get("company_name", ""),
                             "filing_date": d.metadata.get("filing_date", "?"),
                             "form_type": d.metadata.get("form_type", "10-K"),
-                            "preview": d.page_content[:200].replace("\n", " "),
+                            "section": d.metadata.get("section", ""),
+                            "preview": _sentence_preview(d.page_content),
                         }
                         for d in reranked_docs
                     ]
 
-                # Client-side year / doc type filter on sources
                 if year_filter or doc_type_filter:
                     result["sources"] = [
-                        s for s in result["sources"]
+                        s
+                        for s in result["sources"]
                         if (not year_filter or s["filing_date"][:4] in year_filter)
                         and (not doc_type_filter or s.get("form_type", "10-K") in doc_type_filter)
                     ]
 
-            st.markdown("### Answer")
+            st.markdown("---")
+            st.markdown("**Answer**")
             st.markdown(result["answer"])
 
-            st.markdown("### Sources")
+            st.markdown("**Sources**")
             if not result["sources"]:
                 st.caption("No sources match the active filters.")
             for i, src in enumerate(result["sources"][:5]):
-                with st.expander(f"[{i+1}] {src['ticker']} — {src['filing_date']} ({src.get('form_type','10-K')})"):
-                    st.caption(src["preview"] + "...")
+                section_part = f" — {src['section']}" if src.get("section") else ""
+                label = f"[{i + 1}]  {src['ticker']}{section_part} — {src['filing_date']} ({src.get('form_type', '10-K')})"
+                with st.expander(label):
+                    if src.get("company_name"):
+                        st.caption(src["company_name"])
+                    st.markdown(src["preview"])
 
 
-# ---------------------------------------------------------------------------
-# Eval dashboard
-# ---------------------------------------------------------------------------
+# ── Eval dashboard ───────────────────────────────────────────────────────────
 
 def render_eval_tab():
-    st.header("Pipeline Evaluation Results")
-    st.caption("RAGAS metrics measured on 10 hand-crafted Q&A pairs from AAPL 10-K filings")
+    st.markdown("## Pipeline Evaluation Results")
+    st.caption("RAGAS metrics measured on 18 hand-crafted Q&A pairs across AAPL and MSFT 10-K filings.")
 
     csv_path = "results/eval_metrics.csv"
     if not os.path.exists(csv_path):
@@ -340,47 +354,55 @@ def render_eval_tab():
     latest = df[df["timestamp"] == df["timestamp"].max()].copy()
 
     best = latest.loc[latest["avg_score"].astype(float).idxmax()]
-    st.markdown(f"**Best pipeline:** `{best['pipeline']}` — avg score `{float(best['avg_score']):.3f}`")
+    st.markdown(
+        f"**Best pipeline:** `{best['pipeline']}` — avg score `{float(best['avg_score']):.3f}`"
+    )
     st.divider()
 
-    display_cols = ["pipeline", "faithfulness", "answer_relevancy", "context_precision", "context_recall", "avg_score"]
+    display_cols = [
+        "pipeline",
+        "faithfulness",
+        "factual_correctness",
+        "context_precision",
+        "context_recall",
+        "avg_score",
+    ]
     st.dataframe(
-        latest[display_cols].style.format({
-            col: "{:.4f}" for col in display_cols if col != "pipeline"
-        }).background_gradient(subset=display_cols[1:], cmap="RdYlGn", vmin=0, vmax=1),
+        latest[display_cols]
+        .style.format({col: "{:.4f}" for col in display_cols if col != "pipeline"})
+        .background_gradient(subset=display_cols[1:], cmap="RdYlGn", vmin=0, vmax=1),
         use_container_width=True,
         hide_index=True,
     )
 
     st.divider()
-    st.markdown("### What each metric means")
-    st.markdown("""
+    st.markdown("**What each metric measures**")
+    st.markdown(
+        """
 | Metric | What it measures | Failure it catches |
 |---|---|---|
-| **Faithfulness** | Are all claims in the answer supported by the retrieved context? | Hallucination |
-| **Answer Relevancy** (Factual Correctness) | Does the answer correctly state the facts? | Wrong numbers/names |
+| **Faithfulness** | Are all claims in the answer supported by retrieved context? | Hallucination |
+| **Factual Correctness** | Does the answer state the correct facts (F1 vs. ground truth)? | Wrong numbers / names |
 | **Context Precision** | Of retrieved chunks, how many are actually relevant? | Retriever noise |
-| **Context Recall** | Did retrieval find all chunks needed to answer? | Retriever gaps |
-""")
+| **Context Recall** | Did retrieval find all chunks needed to answer the question? | Retriever gaps |
+"""
+    )
 
     if len(df["timestamp"].unique()) > 1:
         st.divider()
-        st.markdown("### Score history across runs")
+        st.markdown("**Score history across runs**")
         history = df.pivot_table(index="timestamp", columns="pipeline", values="avg_score")
         st.line_chart(history)
 
 
-# ---------------------------------------------------------------------------
-# About
-# ---------------------------------------------------------------------------
+# ── About ────────────────────────────────────────────────────────────────────
 
 def render_about_tab():
-    st.header("About this project")
-    st.markdown("""
-### Finance RAG with Deep Evaluation
-
-A **Retrieval-Augmented Generation (RAG)** system for querying SEC 10-K annual
-filings from Apple, Microsoft, and Google.
+    st.markdown("## About")
+    st.markdown(
+        """
+A Retrieval-Augmented Generation system for querying SEC 10-K annual filings.
+Load filings for any public company and ask questions grounded strictly in the source documents.
 
 ---
 
@@ -388,26 +410,26 @@ filings from Apple, Microsoft, and Google.
 
 ```
 SEC EDGAR API
-      ↓
+      |
   HTML parsing + XBRL noise removal
-      ↓
+      |
   RecursiveCharacterTextSplitter (512 chars, 64 overlap)
-      ↓
-  text-embedding-3-small → Qdrant Cloud (vector store)
-      ↓
+      |
+  text-embedding-3-small  →  Qdrant Cloud
+      |
   Hybrid retrieval: BM25 + Vector + Reciprocal Rank Fusion
-      ↓
+      |
   Cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
-      ↓
+      |
   GPT-4o-mini with grounding prompt
-      ↓
+      |
   Answer + source attribution
 ```
 
 ### Evaluation
 
-Measured with **RAGAS** across three pipeline variants on 20 hand-crafted Q&A pairs.
-Key finding: vector-only outperforms hybrid on a small corpus — discovered through evaluation, not assumed.
+Measured with RAGAS across three pipeline variants on 20 hand-crafted Q&A pairs.
+Key finding: vector-only retrieval outperforms hybrid on a small corpus — discovered through evaluation, not assumed.
 
 ---
 
@@ -415,31 +437,32 @@ Key finding: vector-only outperforms hybrid on a small corpus — discovered thr
 
 `LangChain` · `Qdrant Cloud` · `OpenAI` · `BM25` · `sentence-transformers` · `RAGAS` · `Streamlit`
 
-**Source code:** [github.com/Armaan2022/finance-rag-eval](https://github.com/Armaan2022/finance-rag-eval)
-""")
+**Source:** [github.com/Armaan2022/finance-rag-eval](https://github.com/Armaan2022/finance-rag-eval)
+"""
+    )
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     if not os.getenv("OPENAI_API_KEY"):
         st.error("OPENAI_API_KEY not set. Add it to your .env file.")
         st.stop()
 
-    tickers = fetch_loaded_tickers()
-    tickers, page = render_sidebar(tickers)
+    page = st.query_params.get("page", "qa")
+    render_navbar(page)
 
+    if page == "eval":
+        render_eval_tab()
+        return
+    if page == "about":
+        render_about_tab()
+        return
+
+    tickers = fetch_loaded_tickers()
     tickers_key = ",".join(sorted(tickers))
     retrievers, chunks, vector_store = load_pipeline(tickers_key)
-
-    if page == "💬  Q&A":
-        render_qa_tab(retrievers, tickers, chunks, vector_store)
-    elif page == "📈  Eval Dashboard":
-        render_eval_tab()
-    elif page == "ℹ️  About":
-        render_about_tab()
+    render_qa_tab(retrievers, tickers, chunks, vector_store)
 
 
 if __name__ == "__main__":

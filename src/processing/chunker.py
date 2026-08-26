@@ -26,8 +26,53 @@ Key concept — chunk_overlap:
   Rule of thumb: overlap = 10–20% of chunk_size.
 """
 
+import re
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+
+# Matches 10-K section headers like "ITEM 1A. RISK FACTORS" or "Item 7. Management's Discussion"
+# anchored to start-of-line to avoid matching inline references like "see Item 7 below".
+_ITEM_RE = re.compile(
+    r"(?m)^[\s]*(?:ITEM|Item)\s+(\d+[A-Z]?)\s*[.:]?\s+([A-Z][^\n]{2,80})",
+)
+
+_ITEM_NAMES = {
+    "1": "Business", "1A": "Risk Factors", "1B": "Unresolved Staff Comments",
+    "2": "Properties", "3": "Legal Proceedings", "4": "Mine Safety Disclosures",
+    "5": "Market for Common Equity", "6": "Selected Financial Data",
+    "7": "Management's Discussion and Analysis", "7A": "Quantitative and Qualitative Disclosures",
+    "8": "Financial Statements", "9": "Changes in and Disagreements with Accountants",
+    "9A": "Controls and Procedures", "9B": "Other Information",
+    "10": "Directors and Executive Officers", "11": "Executive Compensation",
+    "12": "Security Ownership", "13": "Certain Relationships",
+    "14": "Principal Accountant Fees", "15": "Exhibits",
+}
+
+
+def _find_section_map(text: str) -> list[tuple[int, str]]:
+    """Return sorted list of (char_offset, 'Item X. Title') from the filing text."""
+    seen: set[str] = set()
+    sections: list[tuple[int, str]] = []
+    for m in _ITEM_RE.finditer(text):
+        key = m.group(1).upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        # Prefer the known canonical title; fall back to whatever the filing says
+        title = _ITEM_NAMES.get(key, m.group(2).strip().title())
+        sections.append((m.start(), f"Item {key}. {title}"))
+    return sections
+
+
+def _section_for_offset(offset: int, section_map: list[tuple[int, str]]) -> str | None:
+    result = None
+    for pos, label in section_map:
+        if pos <= offset:
+            result = label
+        else:
+            break
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -79,34 +124,30 @@ def chunk_documents(
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        # length_function=len measures in characters, not tokens.
-        # text-embedding-3-small uses ~4 chars/token on average for English,
-        # so chunk_size=512 chars ≈ 128 tokens. This is a simplification —
-        # in Week 3 we could swap in a proper tokenizer, but character-based
-        # splitting is standard and works well in practice.
         length_function=len,
-        # These separators are tried in order. The splitter uses the first
-        # one that produces chunks within the size limit.
         separators=["\n\n", "\n", ". ", " ", ""],
+        add_start_index=True,  # adds 'start_index' to each chunk's metadata
     )
 
     all_chunks: list[Document] = []
 
     for doc in documents:
-        raw_chunks = splitter.split_text(doc["text"])
+        section_map = _find_section_map(doc["text"])
+        raw_chunks = splitter.create_documents([doc["text"]])
 
-        for i, chunk_text in enumerate(raw_chunks):
-            # Inherit all metadata from the source document and add chunk index.
-            # This is critical — when we retrieve a chunk later, we need to know
-            # which company/filing it came from.
+        for i, chunk_doc in enumerate(raw_chunks):
+            start_index = chunk_doc.metadata.get("start_index", 0)
+            section = _section_for_offset(start_index, section_map)
             chunk_metadata = {
                 **doc["metadata"],
                 "chunk_index": i,
                 "total_chunks": len(raw_chunks),
                 "chunk_config": config_name,
             }
+            if section:
+                chunk_metadata["section"] = section
             all_chunks.append(Document(
-                page_content=chunk_text,
+                page_content=chunk_doc.page_content,
                 metadata=chunk_metadata,
             ))
 
