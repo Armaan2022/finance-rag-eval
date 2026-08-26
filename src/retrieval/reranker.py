@@ -2,7 +2,6 @@ from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
 
 
-
 # Model loading
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
@@ -19,7 +18,6 @@ def get_reranker() -> CrossEncoder:
     return reranker
 
 
-
 # Reranking function
 def rerank(
     query: str,
@@ -28,17 +26,9 @@ def rerank(
 ) -> list[Document]:
     """
     Rerank a list of candidate documents using a cross-encoder.
-
-    Args:
-        query:  The user's question.
-        docs:   Candidate documents from hybrid search (typically top 10-20).
-        top_n:  How many to return after reranking. 3 is the right default —
-                enough context for the LLM without bloating the prompt.
-
-    Returns:
-        The top_n most relevant Documents according to the cross-encoder,
-        in descending order of relevance.
+    Returns the top_n most relevant Documents according to the cross-encoder, in descending order of relevance.
     """
+
     reranker = get_reranker()
 
     # Build input pairs: [(query, chunk1_text), (query, chunk2_text), ...]
@@ -61,16 +51,9 @@ def retrieve_and_rerank(
     top_n: int = 3,
 ) -> list[Document]:
     """
-    Two-stage retrieval: hybrid search for candidates, cross-encoder for precision.
-
-    Args:
-        query:            The user's question.
-        hybrid_retriever: A HybridRetriever instance (fetch_k should be ~20
-                          so the reranker has enough candidates to work with).
-        top_n:            Final number of documents to pass to the LLM.
-
-    This is the function pipeline.py will call in the updated RAG chain.
+    Two-stage retrieval. Hybrid search for candidates, cross-encoder for precision.
     """
+
     # Stage 1: get broad candidate set from hybrid search
     candidates = hybrid_retriever.invoke(query)
 
@@ -101,7 +84,7 @@ if __name__ == "__main__":
     else:
         vector_store = build_vector_store(chunks)
 
-    # fetch_k=20 gives the reranker a meaningful pool to work with
+    # fetch_k=20 gives the reranker a meaningful dataset to work with
     hybrid_retriever = HybridRetriever(vector_store=vector_store, chunks=chunks, k=20, fetch_k=20)
 
     test_queries = [

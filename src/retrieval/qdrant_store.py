@@ -17,6 +17,7 @@ def get_embeddings() -> OpenAIEmbeddings:
 
 def _get_client() -> QdrantClient:
     """Connect to Qdrant Cloud using env vars."""
+
     return QdrantClient(
         url=os.environ["QDRANT_URL"],
         api_key=os.environ["QDRANT_API_KEY"],
@@ -24,13 +25,8 @@ def _get_client() -> QdrantClient:
 
 
 def build_qdrant_store(chunks: list[Document]) -> QdrantVectorStore:
-    """
-    Embed chunks and upload them to Qdrant Cloud.
+    """Create the Qdrant collection, then embed and upload all chunks."""
 
-    Creates the collection if it doesn't exist yet, then upserts all chunks.
-    Run this once locally — vectors persist in the cloud, so Streamlit Cloud
-    never needs to re-embed.
-    """
     client = _get_client()
 
     # Create collection only if it doesn't exist yet
@@ -59,11 +55,8 @@ def build_qdrant_store(chunks: list[Document]) -> QdrantVectorStore:
 
 
 def _ensure_payload_indexes(client: QdrantClient) -> None:
-    """
-    Create payload indexes required for filtered search and delete.
-    Qdrant needs a keyword index on metadata.ticker before any filter
-    on that field can be used in a query. Safe to call repeatedly.
-    """
+    """Qdrant requires keyword indexes before filtered queries work."""
+
     from qdrant_client.models import PayloadSchemaType
     for field in ("metadata.ticker", "metadata.filing_date", "metadata.form_type"):
         client.create_payload_index(
@@ -74,10 +67,8 @@ def _ensure_payload_indexes(client: QdrantClient) -> None:
 
 
 def load_qdrant_store() -> QdrantVectorStore:
-    """
-    Connect to an existing Qdrant collection without re-embedding.
-    This is what the app calls on every startup.
-    """
+    """Connect to the existing Qdrant collection with no re-embedding."""
+
     client = _get_client()
     _ensure_payload_indexes(client)
     return QdrantVectorStore(
@@ -89,6 +80,7 @@ def load_qdrant_store() -> QdrantVectorStore:
 
 def upload_ticker_chunks(chunks: list[Document], batch_size: int = 32) -> None:
     """Add chunks for a new ticker to an existing Qdrant collection."""
+
     vector_store = load_qdrant_store()
     for i in range(0, len(chunks), batch_size):
         vector_store.add_documents(chunks[i : i + batch_size])
@@ -97,12 +89,13 @@ def upload_ticker_chunks(chunks: list[Document], batch_size: int = 32) -> None:
 
 def delete_ticker_vectors(ticker: str) -> None:
     """Delete all vectors for a given ticker from Qdrant."""
+
     client = _get_client()
     ticker_upper = ticker.upper()
     ids_to_delete: list = []
     offset = None
 
-    # Scroll without a filter (no index required), collect matching IDs client-side
+    # Scroll without a filter and collect matching IDs client-side
     while True:
         results, next_offset = client.scroll(
             collection_name=COLLECTION_NAME,
@@ -128,11 +121,8 @@ def delete_ticker_vectors(ticker: str) -> None:
 
 
 def get_chunks_from_qdrant() -> list[Document]:
-    """
-    Reconstruct all stored Document chunks from Qdrant payloads.
-    LangChain stores page_content and metadata in the payload at upload time,
-    so we never need to re-download from SEC EDGAR just to rebuild BM25.
-    """
+    """Pull all chunks from Qdrant payloads. LangChain stores page_content there, so no re-download needed."""
+
     client = _get_client()
     docs: list[Document] = []
     offset = None
@@ -159,13 +149,8 @@ def get_chunks_from_qdrant() -> list[Document]:
 
 
 def get_tickers_from_qdrant() -> list[str]:
-    """
-    Query Qdrant for the distinct set of tickers stored in the collection.
+    """Scroll Qdrant to get the list of donwloaded tickers"""
 
-    This is the authoritative source of truth — no JSON file needed.
-    Scrolls through all points (without vectors) and collects unique ticker values
-    from the metadata payload.
-    """
     client = _get_client()
     tickers: set[str] = set()
     offset = None
@@ -192,11 +177,9 @@ def get_tickers_from_qdrant() -> list[str]:
 def get_retriever(vector_store: QdrantVectorStore, k: int = 5, metadata_filter: dict | None = None):
     """
     Wrap the Qdrant store as a LangChain retriever.
-
-    metadata_filter: a plain dict like {"ticker": "AAPL"} or {"ticker": ["AAPL", "MSFT"]}.
-    List values are treated as OR (MatchAny). This is converted to a Qdrant Filter object
-    so Qdrant can apply it server-side.
+    metadata_filter is a plain dict.
     """
+    
     search_kwargs: dict = {"k": k}
     if metadata_filter is not None:
         from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny

@@ -1,5 +1,6 @@
 def _sentence_preview(text: str, min_chars: int = 150, max_chars: int = 400) -> str:
     """Return text up to the first sentence boundary after min_chars."""
+
     flat = text.replace("\n", " ").strip()
     if len(flat) <= min_chars:
         return flat
@@ -8,28 +9,13 @@ def _sentence_preview(text: str, min_chars: int = 150, max_chars: int = 400) -> 
         idx = window.find(punct)
         if idx != -1:
             return flat[: min_chars + idx + 1].strip()
-    # No sentence end found — cut at the last space to avoid mid-word truncation
+        
+    # If no sentence end found, then cut at the last space to avoid incomplete sentences. 
     end = flat[:max_chars].rfind(" ")
     return flat[: end if end > min_chars else max_chars].strip()
 
 
-"""
-RAG Pipeline Module
--------------------
-Connects the retriever (ChromaDB) to a language model (GPT-4o-mini)
-to answer questions grounded in SEC 10-K filings.
-
-Key concepts:
-- Prompt template: a structured message that tells the LLM exactly how to
-  behave. Without it, the LLM answers from training data, not your documents.
-- Grounding / faithfulness: the LLM's answer should only use facts from the
-  retrieved chunks. This is measurable — Week 3 uses RAGAS to score it.
-- LangChain Expression Language (LCEL): the | pipe syntax chains components.
-  retriever | prompt | llm | output_parser is the full RAG pipeline.
-  Each component's output becomes the next component's input.
-- Source attribution: we return which chunks were used so answers are
-  auditable — critical for finance where accuracy matters.
-"""
+# Connects the retriever to GPT-4o-mini. Answers are grounded in retrieved chunks only.
 
 from operator import itemgetter
 
@@ -39,22 +25,9 @@ from langchain_core.runnables import RunnableParallel
 from langchain_openai import ChatOpenAI
 
 
-# ---------------------------------------------------------------------------
 # Prompt template
-# ---------------------------------------------------------------------------
-
-# This is the most important part of the RAG chain.
-# The {context} placeholder gets filled with retrieved chunks.
-# The {question} placeholder gets filled with the user's query.
-#
-# Why "only use the context below"?
-#   Without this constraint, GPT-4o-mini will blend its training knowledge
-#   with retrieved facts, making it impossible to know which source an answer
-#   came from. For finance RAG, you want answers traceable to specific filings.
-#
-# Why "If the answer is not in the context, say you don't know"?
-#   Hallucination is a real risk with financial data. Telling the model to
-#   admit ignorance is safer than a confident wrong number.
+# {context} = retrieved chunks, {question} = user's query.
+# "only use the context below" stops it from mixing in training knowledge.
 
 SYSTEM_PROMPT = """You are a financial analyst assistant specializing in SEC filings.
 Answer the user's question using ONLY the context provided below.
@@ -77,22 +50,9 @@ PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
-# ---------------------------------------------------------------------------
-# Format retrieved chunks into a single context string
-# ---------------------------------------------------------------------------
-
 def format_docs(docs) -> str:
-    """
-    Concatenate retrieved Document chunks into a single context string.
+    """Prefix each chunk with ticker + date so the LLM knows which filing it's reading."""
 
-    Each chunk is prefixed with its source metadata so the LLM knows
-    which company and filing year the text comes from.
-
-    Why include metadata in the context string?
-        The LLM only sees the context string — it can't read Document
-        metadata directly. Prefixing each chunk with [AAPL, 2025-10-31]
-        lets the LLM correctly attribute its answers.
-    """
     formatted = []
     for doc in docs:
         ticker = doc.metadata.get("ticker", "Unknown")
@@ -101,41 +61,15 @@ def format_docs(docs) -> str:
     return "\n\n---\n\n".join(formatted)
 
 
-# ---------------------------------------------------------------------------
-# Build the RAG chain
-# ---------------------------------------------------------------------------
-
 def build_rag_chain(retriever):
-    """
-    Assemble the full RAG pipeline using LangChain Expression Language (LCEL).
+    """Build the RAG chain: retriever → format → prompt → LLM → string output."""
 
-    The chain works as follows:
-      1. RunnableParallel runs two things at once:
-         - "context": retrieves relevant chunks and formats them as a string
-         - "question": passes the original question through unchanged
-      2. PROMPT: fills {context} and {question} into the template
-      3. LLM: sends the filled prompt to GPT-4o-mini
-      4. StrOutputParser: extracts the text string from the LLM response object
-
-    Why GPT-4o-mini and not GPT-4o?
-        For RAG, the retriever does the heavy lifting of finding relevant info.
-        The LLM just needs to read and summarise — a smaller model handles
-        this well at a fraction of the cost (~10x cheaper than GPT-4o).
-
-    Args:
-        retriever: A LangChain retriever (from vector_store.get_retriever())
-
-    Returns:
-        A runnable chain. Call chain.invoke({"question": "..."}) to get answers.
-    """
     llm = ChatOpenAI(
         model="gpt-4o-mini",
-        temperature=0,   # 0 = deterministic, no creativity. You want consistent
-                         # factual answers for finance, not creative paraphrasing.
+        temperature=0, 
     )
 
-    # RunnableParallel runs both branches simultaneously, then merges results
-    # into a dict: {"context": "..formatted chunks..", "question": "..query.."}
+    # Run retrieval and pass the question through in parallel, then merge into one dict
     setup = RunnableParallel({
         "context": itemgetter("question") | retriever | format_docs,
         "question": itemgetter("question"),
@@ -145,26 +79,13 @@ def build_rag_chain(retriever):
     return chain
 
 
-# ---------------------------------------------------------------------------
-# Convenience wrapper with source attribution
-# ---------------------------------------------------------------------------
 
 def ask(chain, retriever, question: str) -> dict:
-    """
-    Ask a question and return both the answer and the source chunks used.
+    """Return the answer plus source metadata for the UI's source panel."""
 
-    Returns a dict with:
-      - answer: the LLM's response string
-      - sources: list of (ticker, filing_date, text_preview) tuples
-
-    Why return sources separately?
-        In Week 4's Streamlit UI, you'll display a "Sources" sidebar
-        showing which chunks backed each answer. This is a key portfolio
-        feature — it shows the system is auditable, not a black box.
-    """
     answer = chain.invoke({"question": question})
 
-    # Re-retrieve to get source metadata (the chain only returns the answer string)
+    # Retrieve to get source metadata (the chain only returns the answer string)
     source_docs = retriever.invoke(question)
     sources = [
         {
@@ -181,9 +102,8 @@ def ask(chain, retriever, question: str) -> dict:
     return {"answer": answer, "sources": sources}
 
 
-# ---------------------------------------------------------------------------
-# Quick test
-# ---------------------------------------------------------------------------
+
+# Small test
 
 if __name__ == "__main__":
     import os
@@ -198,7 +118,8 @@ if __name__ == "__main__":
     CHROMA_DIR = Path(__file__).resolve().parents[2] / "chroma_db"
 
     print("=== Loading vector store ===")
-    # Load from disk — no re-embedding needed
+
+    # Load from disk.
     if CHROMA_DIR.exists() and any(CHROMA_DIR.iterdir()):
         vector_store = load_vector_store()
         print("  Loaded from disk.")

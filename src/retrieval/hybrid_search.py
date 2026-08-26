@@ -8,17 +8,8 @@ from rank_bm25 import BM25Okapi
 
 # BM25 index
 def build_bm25_index(chunks: list[Document]) -> tuple[BM25Okapi, list[Document]]:
-    """
-    Build a BM25 index from a list of Document chunks.
+    """Tokenize chunks (lowercase + whitespace split) and build a BM25 index."""
 
-    BM25 works on tokenized text — we split on whitespace and lowercase
-    everything. Simple tokenization is fine here; finance documents don't
-    need stemming or stop-word removal for our purposes.
-
-    Returns:
-        (bm25_index, chunks) — the index and the original chunks list
-        in the same order, so index position maps back to the document.
-    """
     tokenized = [
         doc.page_content.lower().split()
         for doc in chunks
@@ -32,16 +23,8 @@ def bm25_search(
     chunks: list[Document],
     k: int = 20,
 ) -> list[tuple[Document, int]]:
-    """
-    Search the BM25 index and return (document, rank) pairs.
-
-    We fetch more candidates (k=20) than the final result count because
-    RRF needs a broad pool from both methods to work well. The fusion
-    step will trim down to the final top-k.
-
-    Returns:
-        List of (Document, rank) tuples, ranked 1..k (1 = best match).
-    """
+    """Score all chunks with BM25 and return the top-k as (doc, rank) pairs."""
+    
     tokenized_query = query.lower().split()
     scores = bm25.get_scores(tokenized_query)
 
@@ -59,26 +42,12 @@ def reciprocal_rank_fusion(
     top_n: int = 5,
 ) -> list[Document]:
     """
-    Merge multiple ranked lists into one using Reciprocal Rank Fusion.
-
-    Args:
-        ranked_lists: Each element is a list of (Document, rank) tuples
-                      from one retrieval method (vector or BM25).
-        k:            RRF constant. 60 is the value from the original paper.
-                      Higher k = less reward for being ranked #1 specifically.
-        top_n:        How many final results to return.
-
-    How it works:
-        For each document, sum up 1/(rank + k) across all lists it appears in.
-        Documents that rank well in multiple lists get the highest combined score.
-        Documents only found by one method still contribute but score lower.
-
-    Identity for deduplication:
-        Two chunks are the "same document" if they share the same page_content.
-        We use a dict keyed on content to accumulate scores.
+    Merge ranked lists from multiple retrieval methods into one.
+    Score per doc = sum of 1/(rank + k) across all lists it appears in.
     """
+
     scores: dict[str, float] = {}
-    doc_map: dict[str, Document] = {}  # content → Document, for reconstruction
+    doc_map: dict[str, Document] = {}
 
     for ranked_list in ranked_lists:
         for doc, rank in ranked_list:
@@ -94,15 +63,7 @@ def reciprocal_rank_fusion(
 # Hybrid retriever
 class HybridRetriever(BaseRetriever):
     """
-    A retriever that combines ChromaDB vector search with BM25 keyword
-    search using Reciprocal Rank Fusion.
-
-    Inherits from BaseRetriever so it works as a drop-in replacement
-    in LangChain LCEL pipelines (supports the | pipe operator).
-
-    BaseRetriever is a Pydantic model, so all fields must be declared
-    as class-level annotations. Non-standard types (BM25Okapi, Chroma)
-    are allowed via model_config.
+    Combines Qdrant vector search with BM25 keyword search via RRF.
     """
 
     model_config = {"arbitrary_types_allowed": True}
@@ -126,7 +87,7 @@ class HybridRetriever(BaseRetriever):
         """
         Run hybrid retrieval: vector + BM25 → RRF fusion.
         """
-        # --- Vector search ---
+        # Vector search
         from src.retrieval.qdrant_store import get_retriever
 
         vector_retriever = get_retriever(
@@ -137,7 +98,7 @@ class HybridRetriever(BaseRetriever):
         vector_docs = vector_retriever.invoke(query)
         vector_ranked = [(doc, rank + 1) for rank, doc in enumerate(vector_docs)]
 
-        # --- BM25 search ---
+        # BM25 search
         # Apply metadata filter manually for BM25. 
         searchable_chunks = []
 
@@ -163,7 +124,7 @@ class HybridRetriever(BaseRetriever):
         bm25_index, filtered_chunks = build_bm25_index(searchable_chunks)
         bm25_ranked = bm25_search(query, bm25_index, filtered_chunks, k=self.fetch_k)
 
-        # --- RRF fusion ---
+        # RRF fusion
         return reciprocal_rank_fusion(
             [vector_ranked, bm25_ranked],
             top_n=self.k,
