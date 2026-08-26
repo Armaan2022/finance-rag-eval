@@ -1,3 +1,18 @@
+def _sentence_preview(text: str, min_chars: int = 150, max_chars: int = 400) -> str:
+    """Return text up to the first sentence boundary after min_chars."""
+    flat = text.replace("\n", " ").strip()
+    if len(flat) <= min_chars:
+        return flat
+    window = flat[min_chars:max_chars]
+    for punct in ".?!":
+        idx = window.find(punct)
+        if idx != -1:
+            return flat[: min_chars + idx + 1].strip()
+    # No sentence end found — cut at the last space to avoid mid-word truncation
+    end = flat[:max_chars].rfind(" ")
+    return flat[: end if end > min_chars else max_chars].strip()
+
+
 """
 RAG Pipeline Module
 -------------------
@@ -154,8 +169,11 @@ def ask(chain, retriever, question: str) -> dict:
     sources = [
         {
             "ticker": doc.metadata.get("ticker", "?"),
+            "company_name": doc.metadata.get("company_name", ""),
             "filing_date": doc.metadata.get("filing_date", "?"),
-            "preview": doc.page_content[:150].replace("\n", " "),
+            "form_type": doc.metadata.get("form_type", "10-K"),
+            "section": doc.metadata.get("section", ""),
+            "preview": _sentence_preview(doc.page_content),
         }
         for doc in source_docs
     ]

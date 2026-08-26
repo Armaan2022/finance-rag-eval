@@ -2,11 +2,14 @@ langchain
 langchain-openai
 langchain-community
 sentence-transformers
+torchvision
 rank-bm25
 ragas
+langchain-google-vertexai
 pypdf
 python-dotenv
 streamlit
+numpy
 pandas
 matplotlib
 qdrant-client
