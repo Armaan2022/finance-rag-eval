@@ -1,38 +1,81 @@
+import re
 from typing import Any
+
+import numpy as np
+import snowballstemmer
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
-from pydantic import model_validator
 from rank_bm25 import BM25Okapi
 
 
+# Tokenizer
+# BM25 only matches exact tokens, so "Revenue," / "revenue" / "revenues" must all become the same token.
+# 1. lowercase  2. pull out word/number tokens (drops punctuation, keeps decimals like "391.04")
+# 3. drop stopwords ("what", "was", "the"...) that every question contains  4. stem ("revenues" -> "revenu")
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+(?:\.[0-9]+)?")
+
+_STOPWORDS = frozenset("""
+a an and are as at be s been being but by can could did do does for from had has have how i if in into is it
+its of on or our over so than that the their them then there these they this those to under was we were
+what when where which while who why will with would you your
+""".split())
+
+_stemmer = snowballstemmer.stemmer("english")
+
+
+def tokenize(text: str) -> list[str]:
+    tokens = [t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS]
+    return _stemmer.stemWords(tokens)
+
+
+def _matches_filter(metadata: dict, metadata_filter: dict) -> bool:
+    """Same semantics as the Qdrant filter: list value = 'any of', scalar = exact match."""
+
+    for key, value in metadata_filter.items():
+        chunk_val = metadata.get(key)
+        if isinstance(value, list):
+            if chunk_val not in value:
+                return False
+        elif chunk_val != value:
+            return False
+    return True
+
+
 # BM25 index
-def build_bm25_index(chunks: list[Document]) -> tuple[BM25Okapi, list[Document]]:
-    """Tokenize chunks (lowercase + whitespace split) and build a BM25 index."""
+class BM25Index:
+    """
+    Built ONCE over the whole corpus, then reused for every query.
+    Metadata filters are applied by masking scores, not by rebuilding the index.
+    The app rebuilds it only when the corpus changes (a company is added or removed).
+    """
 
-    tokenized = [
-        doc.page_content.lower().split()
-        for doc in chunks
-    ]
-    return BM25Okapi(tokenized), chunks
+    def __init__(self, chunks: list[Document]):
+        self.chunks = chunks
+        self._bm25 = BM25Okapi([tokenize(doc.page_content) for doc in chunks]) if chunks else None
 
+    def search(
+        self,
+        query: str,
+        k: int = 20,
+        metadata_filter: dict | None = None,
+    ) -> list[tuple[Document, int]]:
+        """Return the top-k chunks as (doc, rank) pairs, restricted to chunks matching the filter."""
 
-def bm25_search(
-    query: str,
-    bm25: BM25Okapi,
-    chunks: list[Document],
-    k: int = 20,
-) -> list[tuple[Document, int]]:
-    """Score all chunks with BM25 and return the top-k as (doc, rank) pairs."""
-    
-    tokenized_query = query.lower().split()
-    scores = bm25.get_scores(tokenized_query)
+        query_tokens = tokenize(query)
+        if self._bm25 is None or not query_tokens:
+            return []
 
-    indexed_scores = list(enumerate(scores))
-    indexed_scores.sort(key=lambda x: x[1], reverse=True)  # sort by score desc
-    top_indices = [i for i, score in indexed_scores[:k]]
+        scores = self._bm25.get_scores(query_tokens)
+        if metadata_filter:
+            mask = np.array([_matches_filter(c.metadata, metadata_filter) for c in self.chunks])
+            scores = np.where(mask, scores, -np.inf)
 
-    return [(chunks[i], rank + 1) for rank, i in enumerate(top_indices)]
+        top = np.argsort(scores)[::-1][:k]
+        # Drop filtered-out chunks and chunks sharing no terms with the query.
+        top = [i for i in top if scores[i] > 0]
+        return [(self.chunks[i], rank + 1) for rank, i in enumerate(top)]
 
 
 # Reciprocal Rank Fusion
@@ -64,32 +107,21 @@ def reciprocal_rank_fusion(
 class HybridRetriever(BaseRetriever):
     """
     Combines Qdrant vector search with BM25 keyword search via RRF.
+    Takes a prebuilt BM25Index so that creating a retriever (e.g. one per filter combination) is cheap.
     """
 
     model_config = {"arbitrary_types_allowed": True}
 
     vector_store: Any
-    chunks: list[Document]
+    bm25_index: BM25Index
     k: int = 5
     fetch_k: int = 20
     metadata_filter: dict | None = None
-    bm25: Any = None  # populated by model_validator after init
-
-    @model_validator(mode="after")
-    def _build_bm25(self):
-        self.bm25, _ = build_bm25_index(self.chunks)
-        return self
 
     def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None) -> list[Document]:
-        return self._hybrid_search(query)
-
-    def _hybrid_search(self, query: str) -> list[Document]:
-        """
-        Run hybrid retrieval: vector + BM25 → RRF fusion.
-        """
-        # Vector search
         from src.retrieval.qdrant_store import get_retriever
 
+        # Vector search
         vector_retriever = get_retriever(
             self.vector_store,
             k=self.fetch_k,
@@ -98,31 +130,8 @@ class HybridRetriever(BaseRetriever):
         vector_docs = vector_retriever.invoke(query)
         vector_ranked = [(doc, rank + 1) for rank, doc in enumerate(vector_docs)]
 
-        # BM25 search
-        # Apply metadata filter manually for BM25. 
-        searchable_chunks = []
-
-        if self.metadata_filter is not None:
-            for chunk in self.chunks:
-                match = True
-
-                for key, value in self.metadata_filter.items():
-                    chunk_val = chunk.metadata.get(key)
-                    if isinstance(value, list):
-                        if chunk_val not in value:
-                            match = False
-                            break
-                    elif chunk_val != value:
-                        match = False
-                        break
-
-                if match:
-                    searchable_chunks.append(chunk)
-        else:
-            searchable_chunks = self.chunks
-
-        bm25_index, filtered_chunks = build_bm25_index(searchable_chunks)
-        bm25_ranked = bm25_search(query, bm25_index, filtered_chunks, k=self.fetch_k)
+        # BM25 search (same filter, applied as a mask over the shared index)
+        bm25_ranked = self.bm25_index.search(query, k=self.fetch_k, metadata_filter=self.metadata_filter)
 
         # RRF fusion
         return reciprocal_rank_fusion(
@@ -134,26 +143,16 @@ class HybridRetriever(BaseRetriever):
 # Quick comparison: vector-only vs hybrid
 if __name__ == "__main__":
     from dotenv import load_dotenv
-    from src.ingestion.sec_edgar import ingest_tickers
-    from src.processing.chunker import chunk_documents
-    from src.retrieval.vector_store import build_vector_store, load_vector_store, get_retriever
-    from pathlib import Path
+    from src.retrieval.qdrant_store import load_qdrant_store, get_retriever, get_chunks_from_qdrant
 
     load_dotenv()
 
-    CHROMA_DIR = Path(__file__).resolve().parents[2] / "chroma_db"
-
     print("Loading data...")
-    documents = ingest_tickers(["AAPL", "MSFT"], max_filings_per_ticker=1)
-    chunks = chunk_documents(documents, config_name="medium")
-
-    if CHROMA_DIR.exists() and any(CHROMA_DIR.iterdir()):
-        vector_store = load_vector_store()
-    else:
-        vector_store = build_vector_store(chunks)
+    chunks = get_chunks_from_qdrant()
+    vector_store = load_qdrant_store()
 
     vector_retriever = get_retriever(vector_store, k=5)
-    hybrid_retriever = HybridRetriever(vector_store=vector_store, chunks=chunks, k=5)
+    hybrid_retriever = HybridRetriever(vector_store=vector_store, bm25_index=BM25Index(chunks), k=5)
 
     test_queries = [
         "What is Apple's EBITDA?",
@@ -163,7 +162,7 @@ if __name__ == "__main__":
 
     for query in test_queries:
         print(f"\n{'='*60}")
-        print(f"Query: {query}")
+        print(f"Query: {query}  ->  tokens: {tokenize(query)}")
 
         print("\n  [Vector only]")
         for doc in vector_retriever.invoke(query):

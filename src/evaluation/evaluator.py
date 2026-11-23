@@ -10,7 +10,7 @@ from ragas.llms import LangchainLLMWrapper
 from langchain_openai import ChatOpenAI
 
 from src.evaluation.eval_dataset import EVAL_QUESTIONS
-from src.rag.pipeline import build_rag_chain
+from src.rag.pipeline import ask, build_rag_chain
 
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "results"
 
@@ -19,33 +19,25 @@ def run_pipeline_on_dataset(
     retriever,
     pipeline_name: str,
     questions: list[dict],
-    use_reranker: bool = False,
-    top_n: int = 3,
 ) -> list[dict]:
-    """Run the RAG chain over all eval questions and collect answers + contexts for RAGAS scoring."""
-    chain = build_rag_chain(retriever)
+    """
+    Run the RAG pipeline over all eval questions and collect answers + contexts for RAGAS scoring.
+    The contexts are the exact chunks the answer was generated from (one retrieval per question),
+    so faithfulness/recall judge the answer against what the model actually read.
+    """
+    chain = build_rag_chain()
     results = []
 
     print(f"\n  Running {pipeline_name} ({len(questions)} questions)...")
 
     for i, item in enumerate(questions):
         question = item["question"]
-
-        answer = chain.invoke({"question": question})
-
-        # Re-retrieve here because the chain only returns the string answer
-        if use_reranker:
-            from src.retrieval.reranker import retrieve_and_rerank
-            docs = retrieve_and_rerank(question, retriever, top_n=top_n)
-        else:
-            docs = retriever.invoke(question)
-
-        contexts = [doc.page_content for doc in docs]
+        out = ask(chain, retriever, question)
 
         results.append({
             "question": question,
-            "answer": answer,
-            "contexts": contexts,
+            "answer": out["answer"],
+            "contexts": [doc.page_content for doc in out["docs"]],
             "ground_truth": item["ground_truth"],
             "pipeline": pipeline_name,
             "ticker": item["ticker"],
@@ -146,7 +138,9 @@ if __name__ == "__main__":
     import os
     from dotenv import load_dotenv
     from src.retrieval.qdrant_store import load_qdrant_store, get_retriever, get_chunks_from_qdrant
-    from src.retrieval.hybrid_search import HybridRetriever
+    from collections import Counter
+    from src.retrieval.hybrid_search import BM25Index, HybridRetriever
+    from src.retrieval.reranker import RERANK_TOP_N, RerankRetriever
 
     load_dotenv()
 
@@ -160,10 +154,20 @@ if __name__ == "__main__":
 
     print(f"  Loaded {len(chunks)} chunks from Qdrant")
 
+    # Scores are only comparable if the collection holds a single chunk size.
+    chunk_configs = Counter(c.metadata.get("chunk_config", "unknown") for c in chunks)
+    print(f"  Chunk configs in collection: {dict(chunk_configs)}")
+    if len(chunk_configs) > 1:
+        print("  WARNING: mixed chunk sizes in the collection; results will not be comparable.")
+
     # --- Define the 3 retrievers ---
+    bm25_index = BM25Index(chunks)  # built once, shared by both hybrid pipelines
     vector_retriever = get_retriever(vector_store, k=5)
-    hybrid_retriever = HybridRetriever(vector_store=vector_store, chunks=chunks, k=5, fetch_k=20)
-    hybrid_rerank_retriever = HybridRetriever(vector_store=vector_store, chunks=chunks, k=20, fetch_k=20)
+    hybrid_retriever = HybridRetriever(vector_store=vector_store, bm25_index=bm25_index, k=5, fetch_k=20)
+    hybrid_rerank_retriever = RerankRetriever(
+        base_retriever=HybridRetriever(vector_store=vector_store, bm25_index=bm25_index, k=20, fetch_k=20),
+        top_n=RERANK_TOP_N,
+    )
 
     all_scores = []
 
@@ -183,10 +187,7 @@ if __name__ == "__main__":
 
     # Pipeline 3: hybrid + reranker
     print("\n=== Pipeline 3: Hybrid + Reranker ===")
-    r_results = run_pipeline_on_dataset(
-        hybrid_rerank_retriever, "hybrid_rerank", QUESTIONS,
-        use_reranker=True, top_n=3,
-    )
+    r_results = run_pipeline_on_dataset(hybrid_rerank_retriever, "hybrid_rerank", QUESTIONS)
     print("  Scoring with RAGAS...")
     r_scores = score_with_ragas(r_results)
     all_scores.append({"pipeline": "hybrid_rerank", **r_scores})

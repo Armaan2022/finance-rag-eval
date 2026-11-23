@@ -53,14 +53,36 @@ def _section_for_offset(offset: int, section_map: list[tuple[int, str]]) -> str 
     return result
 
 
-# Three presets (currently we are using large for better faithfulness)
+# Three presets, kept so chunk sizes can still be compared in experiments.
 CHUNK_CONFIGS = {
     "small":  {"chunk_size": 256,  "chunk_overlap": 32},
     "medium": {"chunk_size": 512,  "chunk_overlap": 64},
     "large":  {"chunk_size": 1024, "chunk_overlap": 128},
 }
 
-DEFAULT_CHUNK_CONFIG = "medium"
+# The ONE setting used everywhere chunks are written to the vector store (the bulk upload
+# script, the app's "Load filing" button, main.py). Callers must not pass their own size,
+# or the same collection ends up holding mixed sizes. "large" won the chunk-size eval
+# (faithfulness ~0.47 -> ~0.87 going from 512 to 1024 chars).
+DEFAULT_CHUNK_CONFIG = "large"
+
+
+# Page headers/footers become their own tiny chunks when they sit between two page breaks,
+# e.g. "Apple Inc. | 2025 Form 10-K | 28 Apple Inc" or "81. Table of Contents Alphabet Inc".
+# They carry no information but match company-name queries, so they crowd real chunks out of
+# the results. A chunk is kept only if it has enough real words once boilerplate is ignored.
+# (Length alone is a bad test: some 140-char chunks hold real figures, like dividends per share.)
+_BOILERPLATE_WORDS = frozenset({
+    "table", "contents", "form", "inc", "corp", "corporation", "platforms",
+    "see", "accompanying", "notes",
+})
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+MIN_CONTENT_WORDS = 5
+
+
+def is_boilerplate_chunk(text: str) -> bool:
+    words = [w for w in _WORD_RE.findall(text) if w.lower() not in _BOILERPLATE_WORDS]
+    return len(words) < MIN_CONTENT_WORDS
 
 
 def chunk_documents(
@@ -78,6 +100,7 @@ def chunk_documents(
         chunk_overlap=chunk_overlap,
         length_function=len,
         separators=["\n\n", "\n", ". ", " ", ""],
+        keep_separator="end",  # keep the "." at the end of the sentence, not at the start of the next chunk
         add_start_index=True,  # adds 'start_index' to each chunk's metadata
     )
 
@@ -85,7 +108,10 @@ def chunk_documents(
 
     for doc in documents:
         section_map = _find_section_map(doc["text"])
-        raw_chunks = splitter.create_documents([doc["text"]])
+        raw_chunks = [
+            c for c in splitter.create_documents([doc["text"]])
+            if not is_boilerplate_chunk(c.page_content)
+        ]
 
         for i, chunk_doc in enumerate(raw_chunks):
             start_index = chunk_doc.metadata.get("start_index", 0)
@@ -136,8 +162,8 @@ if __name__ == "__main__":
         print_chunk_stats(chunks, config_name)
 
     # Show a sample chunk so we can see what the embedder will receive
-    sample_chunks = chunk_documents(documents, config_name="medium")
-    print("\n--- Sample chunk (medium config) ---")
+    sample_chunks = chunk_documents(documents)
+    print(f"\n--- Sample chunk ({DEFAULT_CHUNK_CONFIG} config) ---")
     sample = sample_chunks[10]
     print(f"  Ticker      : {sample.metadata['ticker']}")
     print(f"  Filing date : {sample.metadata['filing_date']}")

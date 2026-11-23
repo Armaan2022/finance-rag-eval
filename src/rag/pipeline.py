@@ -1,15 +1,20 @@
+import re
+
+# A sentence ends at . ? ! followed by whitespace or end of text, so decimals like "$ 7.5" don't count.
+_SENTENCE_END_RE = re.compile(r"[.?!](?=\s|$)")
+
+
 def _sentence_preview(text: str, min_chars: int = 150, max_chars: int = 400) -> str:
     """Return text up to the first sentence boundary after min_chars."""
 
-    flat = text.replace("\n", " ").strip()
+    # Older chunks start with ". " (the splitter attached the separator to the next chunk), so strip it.
+    flat = text.replace("\n", " ").strip().lstrip(".?! ")
     if len(flat) <= min_chars:
         return flat
-    window = flat[min_chars:max_chars]
-    for punct in ".?!":
-        idx = window.find(punct)
-        if idx != -1:
-            return flat[: min_chars + idx + 1].strip()
-        
+    match = _SENTENCE_END_RE.search(flat, min_chars, max_chars)
+    if match:
+        return flat[: match.end()].strip()
+
     # If no sentence end found, then cut at the last space to avoid incomplete sentences. 
     end = flat[:max_chars].rfind(" ")
     return flat[: end if end > min_chars else max_chars].strip()
@@ -21,7 +26,7 @@ from operator import itemgetter
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableParallel
+from langchain_core.runnables import RunnableLambda, RunnableParallel
 from langchain_openai import ChatOpenAI
 
 
@@ -61,45 +66,52 @@ def format_docs(docs) -> str:
     return "\n\n---\n\n".join(formatted)
 
 
-def build_rag_chain(retriever):
-    """Build the RAG chain: retriever → format → prompt → LLM → string output."""
+def build_rag_chain():
+    """
+    Build the generation chain: {question, docs} → format → prompt → LLM → string.
+    Retrieval is deliberately NOT inside the chain; ask() retrieves once and passes the docs in,
+    so the answer, the sources panel and the eval all use the exact same chunks.
+    """
 
     llm = ChatOpenAI(
         model="gpt-4o-mini",
-        temperature=0, 
+        temperature=0,
     )
 
-    # Run retrieval and pass the question through in parallel, then merge into one dict
     setup = RunnableParallel({
-        "context": itemgetter("question") | retriever | format_docs,
+        "context": itemgetter("docs") | RunnableLambda(format_docs),
         "question": itemgetter("question"),
     })
 
-    chain = setup | PROMPT | llm | StrOutputParser()
-    return chain
+    return setup | PROMPT | llm | StrOutputParser()
 
+
+def source_info(doc) -> dict:
+    """Metadata + preview for one chunk, as shown in the UI's sources panel."""
+
+    return {
+        "ticker": doc.metadata.get("ticker", "?"),
+        "company_name": doc.metadata.get("company_name", ""),
+        "filing_date": doc.metadata.get("filing_date", "?"),
+        "form_type": doc.metadata.get("form_type", "10-K"),
+        "section": doc.metadata.get("section", ""),
+        "preview": _sentence_preview(doc.page_content),
+    }
 
 
 def ask(chain, retriever, question: str) -> dict:
-    """Return the answer plus source metadata for the UI's source panel."""
+    """
+    Retrieve ONCE, then generate from those chunks.
+    Returns the answer, the raw docs the model read (for evaluation) and their source metadata (for the UI).
+    """
 
-    answer = chain.invoke({"question": question})
-
-    # Retrieve to get source metadata (the chain only returns the answer string)
-    source_docs = retriever.invoke(question)
-    sources = [
-        {
-            "ticker": doc.metadata.get("ticker", "?"),
-            "company_name": doc.metadata.get("company_name", ""),
-            "filing_date": doc.metadata.get("filing_date", "?"),
-            "form_type": doc.metadata.get("form_type", "10-K"),
-            "section": doc.metadata.get("section", ""),
-            "preview": _sentence_preview(doc.page_content),
-        }
-        for doc in source_docs
-    ]
-
-    return {"answer": answer, "sources": sources}
+    docs = retriever.invoke(question)
+    answer = chain.invoke({"question": question, "docs": docs})
+    return {
+        "answer": answer,
+        "docs": docs,
+        "sources": [source_info(doc) for doc in docs],
+    }
 
 
 
@@ -126,11 +138,11 @@ if __name__ == "__main__":
     else:
         print("  Building from scratch...")
         documents = ingest_tickers(["AAPL", "MSFT"], max_filings_per_ticker=1)
-        chunks = chunk_documents(documents, config_name="medium")
+        chunks = chunk_documents(documents)
         vector_store = build_vector_store(chunks)
 
     retriever = get_retriever(vector_store, k=5)
-    chain = build_rag_chain(retriever)
+    chain = build_rag_chain()
 
     print("\n=== Finance Q&A ===\n")
 
