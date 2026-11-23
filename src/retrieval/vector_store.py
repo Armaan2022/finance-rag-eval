@@ -96,8 +96,8 @@ if __name__ == "__main__":
     print("=== Step 1: Ingest ===")
     documents = ingest_tickers(["AAPL", "MSFT"], max_filings_per_ticker=1)
 
-    print("\n=== Step 2: Chunk (medium config) ===")
-    chunks = chunk_documents(documents, config_name="medium")
+    print("\n=== Step 2: Chunk ===")
+    chunks = chunk_documents(documents)
     print(f"  {len(chunks)} chunks ready")
 
     print("\n=== Step 3: Embed + store ===")

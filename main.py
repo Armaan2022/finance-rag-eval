@@ -18,7 +18,6 @@ load_dotenv()
 # -------------------------------------------------------------------
 TICKERS = ["AAPL", "MSFT", "GOOGL"]
 MAX_FILINGS = 2
-CHUNK_CONFIG = "medium"
 CHROMA_DIR = Path("chroma_db")
 
 # -------------------------------------------------------------------
@@ -36,14 +35,14 @@ def build_pipeline(reset_store: bool = False):
         documents = ingest_tickers(TICKERS, max_filings_per_ticker=MAX_FILINGS)
 
         print("\n=== Step 2: Chunk ===")
-        chunks = chunk_documents(documents, config_name=CHUNK_CONFIG)
+        chunks = chunk_documents(documents)  # always DEFAULT_CHUNK_CONFIG
         print(f"  {len(chunks)} chunks ready")
 
         print("\n=== Step 3: Embed + store ===")
         vector_store = build_vector_store(chunks, reset=reset_store)
 
     retriever = get_retriever(vector_store, k=5)
-    chain = build_rag_chain(retriever)
+    chain = build_rag_chain()
     return chain, retriever
 
 

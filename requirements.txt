@@ -4,6 +4,7 @@ langchain-community
 sentence-transformers
 torchvision
 rank-bm25
+snowballstemmer
 ragas
 langchain-google-vertexai
 pypdf

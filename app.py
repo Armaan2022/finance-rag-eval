@@ -3,7 +3,7 @@ import os
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from src.rag.pipeline import _sentence_preview
+from src.processing.chunker import CHUNK_CONFIGS, DEFAULT_CHUNK_CONFIG
 
 load_dotenv()
 
@@ -28,35 +28,59 @@ def fetch_loaded_tickers() -> list[str]:
 
 @st.cache_resource(show_spinner=False)
 def load_pipeline(tickers_key: str):
-    from src.retrieval.qdrant_store import load_qdrant_store, get_retriever, get_chunks_from_qdrant
-    from src.retrieval.hybrid_search import HybridRetriever
+    from src.retrieval.qdrant_store import load_qdrant_store, get_chunks_from_qdrant
+    from src.retrieval.hybrid_search import BM25Index
 
     # Load chunks from Qdrant payloads.
     chunks = get_chunks_from_qdrant()
     vector_store = load_qdrant_store()
 
+    # Built once per corpus. This function is cached on tickers_key, and adding or removing
+    # a company clears the cache, so the index is rebuilt only when the corpus changes.
+    bm25_index = BM25Index(chunks)
+
     retrievers = {
-        "Vector only": get_retriever(vector_store, k=5),
-        "Hybrid (BM25 + Vector + RRF)": HybridRetriever(
-            vector_store=vector_store, chunks=chunks, k=5, fetch_k=20
-        ),
-        "Hybrid + Reranker": HybridRetriever(
-            vector_store=vector_store, chunks=chunks, k=20, fetch_k=20
-        ),
+        name: make_retriever(name, vector_store, bm25_index)
+        for name in PIPELINES
     }
-    return retrievers, chunks, vector_store
+    return retrievers, chunks, vector_store, bm25_index
+
+
+PIPELINES = ["Vector only", "Hybrid (BM25 + Vector + RRF)", "Hybrid + Reranker"]
+
+
+def make_retriever(pipeline_choice, vector_store, bm25_index, metadata_filter=None):
+    """One place that maps a pipeline name to its retriever. Each retriever returns the final chunks the LLM reads."""
+
+    from src.retrieval.qdrant_store import get_retriever
+    from src.retrieval.hybrid_search import HybridRetriever
+    from src.retrieval.reranker import RERANK_TOP_N, RerankRetriever
+
+    if pipeline_choice == "Vector only":
+        return get_retriever(vector_store, k=5, metadata_filter=metadata_filter)
+    if pipeline_choice == "Hybrid (BM25 + Vector + RRF)":
+        return HybridRetriever(
+            vector_store=vector_store, bm25_index=bm25_index,
+            k=5, fetch_k=20, metadata_filter=metadata_filter,
+        )
+    # Hybrid + Reranker: 20 hybrid candidates → cross-encoder keeps the top RERANK_TOP_N
+    return RerankRetriever(
+        base_retriever=HybridRetriever(
+            vector_store=vector_store, bm25_index=bm25_index,
+            k=20, fetch_k=20, metadata_filter=metadata_filter,
+        ),
+        top_n=RERANK_TOP_N,
+    )
 
 
 def build_filtered_retriever(
-    pipeline_choice, vector_store, chunks,
+    pipeline_choice, vector_store, chunks, bm25_index,
     ticker_filter=None, year_filter=None, doc_type_filter=None,
 ):
     """
     Build a retriever with metadata filters applied.
+    Returns None when the selected filters match no filings.
     """
-
-    from src.retrieval.qdrant_store import get_retriever
-    from src.retrieval.hybrid_search import HybridRetriever
 
     meta_filter: dict = {}
     if ticker_filter:
@@ -69,22 +93,13 @@ def build_filtered_retriever(
             if c.metadata.get("filing_date", "")[:4] in year_filter
             and (not ticker_filter or c.metadata.get("ticker") in ticker_filter)
         })
-        if matching_dates:
-            meta_filter["filing_date"] = matching_dates
+        if not matching_dates:
+            return None
+        meta_filter["filing_date"] = matching_dates
     if doc_type_filter:
         meta_filter["form_type"] = doc_type_filter
 
-    effective_filter = meta_filter or None
-    k = 20 if pipeline_choice == "Hybrid + Reranker" else 5
-    if pipeline_choice == "Vector only":
-        return get_retriever(vector_store, k=k, metadata_filter=effective_filter)
-    return HybridRetriever(
-        vector_store=vector_store,
-        chunks=chunks,
-        k=k,
-        fetch_k=20,
-        metadata_filter=effective_filter,
-    )
+    return make_retriever(pipeline_choice, vector_store, bm25_index, metadata_filter=meta_filter or None)
 
 
 # Navbar
@@ -185,7 +200,7 @@ def render_filings_panel(tickers: list[str]):
                     else:
                         from src.processing.chunker import chunk_documents
                         from src.retrieval.qdrant_store import upload_ticker_chunks
-                        chunks = chunk_documents(documents, config_name="large")
+                        chunks = chunk_documents(documents)  # always DEFAULT_CHUNK_CONFIG
                         upload_ticker_chunks(chunks)
                         fetch_loaded_tickers.clear()
                         load_pipeline.clear()
@@ -196,7 +211,7 @@ def render_filings_panel(tickers: list[str]):
 
 # Q&A tab
 
-def render_qa_tab(retrievers, tickers, chunks, vector_store):
+def render_qa_tab(retrievers, tickers, chunks, vector_store, bm25_index):
     col_filings, col_main, col_pipeline = st.columns([1, 2, 1], gap="large")
 
     with col_filings:
@@ -268,7 +283,7 @@ def render_qa_tab(retrievers, tickers, chunks, vector_store):
         if st.button("Ask", type="primary", use_container_width=True) and query:
             retriever = (
                 build_filtered_retriever(
-                    pipeline_choice, vector_store, chunks,
+                    pipeline_choice, vector_store, chunks, bm25_index,
                     ticker_filter=ticker_filter,
                     year_filter=year_filter,
                     doc_type_filter=doc_type_filter,
@@ -277,35 +292,15 @@ def render_qa_tab(retrievers, tickers, chunks, vector_store):
                 else retrievers[pipeline_choice]
             )
 
+            if retriever is None:
+                st.caption("No filings match the active filters.")
+                return
+
             with st.spinner("Retrieving and generating answer..."):
                 from src.rag.pipeline import build_rag_chain, ask
 
-                use_reranker = pipeline_choice == "Hybrid + Reranker"
-                chain = build_rag_chain(retriever)
-                result = ask(chain, retriever, query)
-
-                if use_reranker:
-                    from src.retrieval.reranker import retrieve_and_rerank
-                    reranked_docs = retrieve_and_rerank(query, retriever, top_n=3)
-                    result["sources"] = [
-                        {
-                            "ticker": d.metadata.get("ticker", "?"),
-                            "company_name": d.metadata.get("company_name", ""),
-                            "filing_date": d.metadata.get("filing_date", "?"),
-                            "form_type": d.metadata.get("form_type", "10-K"),
-                            "section": d.metadata.get("section", ""),
-                            "preview": _sentence_preview(d.page_content),
-                        }
-                        for d in reranked_docs
-                    ]
-
-                if year_filter or doc_type_filter:
-                    result["sources"] = [
-                        s
-                        for s in result["sources"]
-                        if (not year_filter or s["filing_date"][:4] in year_filter)
-                        and (not doc_type_filter or s.get("form_type", "10-K") in doc_type_filter)
-                    ]
+                # One retrieval: these sources are exactly the chunks the model read.
+                result = ask(build_rag_chain(), retriever, query)
 
             st.markdown("---")
             st.markdown("**Answer**")
@@ -383,8 +378,9 @@ def render_eval_tab():
 
 def render_about_tab():
     st.markdown("## About")
+    chunk_cfg = CHUNK_CONFIGS[DEFAULT_CHUNK_CONFIG]
     st.markdown(
-        """
+        f"""
 A Retrieval-Augmented Generation system for querying SEC 10-K annual filings.
 Load filings for any public company and ask questions grounded strictly in the source documents.
 
@@ -397,13 +393,13 @@ SEC EDGAR API
       |
   HTML parsing + XBRL noise removal
       |
-  RecursiveCharacterTextSplitter (512 chars, 64 overlap)
+  RecursiveCharacterTextSplitter ({chunk_cfg['chunk_size']} chars, {chunk_cfg['chunk_overlap']} overlap)
       |
   text-embedding-3-small  →  Qdrant Cloud
       |
-  Hybrid retrieval: BM25 + Vector + Reciprocal Rank Fusion
+  Hybrid retrieval: BM25 (stemmed) + Vector + Reciprocal Rank Fusion
       |
-  Cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
+  Cross-encoder reranker (ms-marco-MiniLM-L-6-v2, fused with hybrid ranking)
       |
   GPT-4o-mini with grounding prompt
       |
@@ -412,8 +408,8 @@ SEC EDGAR API
 
 ### Evaluation
 
-Measured with RAGAS across three pipeline variants on 20 hand-crafted Q&A pairs.
-Key finding: vector-only retrieval outperforms hybrid on a small corpus — discovered through evaluation, not assumed.
+Measured with RAGAS across three pipeline variants on 18 hand-crafted Q&A pairs.
+Key finding: the reranker first looked worst, but the evaluation was judging it against fewer chunks than it answered from. Once that was fixed, data quality (chunk size, removing page-header chunks) mattered more than the choice of pipeline.
 
 ---
 
@@ -445,8 +441,8 @@ def main():
 
     tickers = fetch_loaded_tickers()
     tickers_key = ",".join(sorted(tickers))
-    retrievers, chunks, vector_store = load_pipeline(tickers_key)
-    render_qa_tab(retrievers, tickers, chunks, vector_store)
+    retrievers, chunks, vector_store, bm25_index = load_pipeline(tickers_key)
+    render_qa_tab(retrievers, tickers, chunks, vector_store, bm25_index)
 
 
 if __name__ == "__main__":
