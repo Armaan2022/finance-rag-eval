@@ -397,9 +397,9 @@ SEC EDGAR API
       |
   text-embedding-3-small  →  Qdrant Cloud
       |
-  Hybrid retrieval: BM25 + Vector + Reciprocal Rank Fusion
+  Hybrid retrieval: BM25 (stemmed) + Vector + Reciprocal Rank Fusion
       |
-  Cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
+  Cross-encoder reranker (ms-marco-MiniLM-L-6-v2, fused with hybrid ranking)
       |
   GPT-4o-mini with grounding prompt
       |
@@ -408,8 +408,8 @@ SEC EDGAR API
 
 ### Evaluation
 
-Measured with RAGAS across three pipeline variants on 20 hand-crafted Q&A pairs.
-Key finding: vector-only retrieval outperforms hybrid on a small corpus — discovered through evaluation, not assumed.
+Measured with RAGAS across three pipeline variants on 18 hand-crafted Q&A pairs.
+Key finding: the reranker first looked worst, but the evaluation was judging it against fewer chunks than it answered from. Once that was fixed, data quality (chunk size, removing page-header chunks) mattered more than the choice of pipeline.
 
 ---
 
